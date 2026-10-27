@@ -1,0 +1,99 @@
+# Tayf — Project guide
+
+**Name:** Tayf (Arabic طيف, "spectrum"). Formerly SpectraIQ; use Tayf everywhere (repo, package, UI).  
+**Date:** 2026-10-27  
+**Status:** Planning finished; decisions confirmed on 2026-10-27. Phase 1 starting.  
+**Main reference (read first):** "Tayf — Product Vision and Architecture" — https://claude.ai/artifact/SLAmTaA6BS7jc5QjTDYoDu  
+(Read it with the Claude Docs connector, not a web fetch.)
+
+---
+
+## 1. Who the user is and how to work
+
+- A Wireless Communications student, building Tayf as a 3-week course project that they genuinely care about.
+- Goal: a **practical product** they fully understand, not a research project (a paper would be a bonus).
+- They care about **concepts and architecture** (wireless, DSP, ML), not code details.
+- Working loop: **briefly introduce the idea → compare practical alternatives → recommend → discuss → implement → test.** Short explanations; no long derivations unless asked.
+- They like **small, editable Jupyter notebooks** (opened in VS Code) where they can change scenarios and parameters and see results. Results are generated when run, never pre-computed.
+- Each stage pairs a module with a short concept notebook.
+- **Agreed:** after every step, give a short technical (not code) summary: the concept, what was built, how it fits the pipeline, how to check it.
+- Never claim something works on their machine without verifying it.
+- Location: **Lebanon** (ITU Region 1). Build band presets from Region 1 and Lebanese allocations, then confirm with real scans. Don't assume.
+
+## 2. Environment
+
+- Windows 11, Radioconda. Existing conda env: `spectraiq` (`C:\Users\USER\radioconda\envs\spectraiq`).
+- HackRF One via SoapySDR. **Quirk:** `SoapySDR.Device()` works; `SoapySDR.Device(dict(driver="hackrf"))` failed earlier.
+- `hackrf_sweep` is available from the Radioconda prompt.
+- An earlier VS Code + Radioconda Jupyter kernel crashed when plotting with Matplotlib. Check notebook plotting early (Plotly or SVG output avoided the crash).
+- The old SpectraIQ project in `C:\Users\USER\Desktop\Ali\Projects\Spectral` is **reference only**. Do not copy code from it. Lessons carried over: an I/Q block data model, Welch PSD, the approach for parsing `hackrf_sweep` CSV, and the detector findings below.
+
+## 3. Hardware
+
+| # | Item | Range | Use |
+|---|---|---|---|
+| — | HackRF One (no PortaPack screen) | 1 MHz–6 GHz, ≤20 MS/s, 8-bit | Receive only |
+| 4 | 5 dBi magnetic whip | 40–860 MHz | FM, airband, 433 MHz, DVB-T |
+| 6 | Telescopic | 40 MHz–6 GHz | Fallback; quarter-wave = 75/f(MHz) m |
+| 7 | "12 dBi" magnetic | 700–2700 MHz | Cellular downlinks, 868 MHz |
+| 8 | "35 dBi" magnetic | 700–2700 MHz | Same; 35 dBi claim is implausible, expect a few dBi |
+| 5 | 8 dBi rubber duck | 2.4/5/5.8 GHz | Wi-Fi, BLE, ESP32 |
+| 1 | 20 dB LNA | 50 MHz–6 GHz | Weak signals; overload risk; **check its power method before enabling HackRF antenna bias power** |
+| — | ESP32 | — | Known BLE (GFSK) and Wi-Fi (OFDM; maybe 802.11b DBPSK/DQPSK) transmitter for real test data |
+
+No AM medium-wave coverage, so the AM class is tested on airband. A 50 Ω SMA terminator is recommended for the characterization (not yet confirmed).
+
+## 4. Decisions
+
+| # | Decision | Status |
+|---|---|---|
+| D1 | 3 weeks; stages 1–4 are the course MVP | **Decided** |
+| D2 | Browser dashboard: FastAPI backend (REST + WebSocket) + web frontend | **Decided** |
+| D4 | Antennas as above | **Decided** |
+| D3 | Class tiers: real-tested WBFM, AM, OFDM, GFSK/FSK, OOK/ASK, Noise (+NBFM if available); synthetic-tested BPSK, QPSK, 16-QAM, GMSK; always Unknown | **Decided** |
+| D5 | Lebanon presets from ITU Region 1 + local allocations, verified by scan | **Decided** |
+| D6 | User buys a 50 Ω SMA male load (DC–6 GHz). No signal generator or second SDR available. Real test transmitters: ESP32s (BLE, Wi-Fi), a car key (likely 433.92 MHz OOK/FSK; receive only, never replay), broadcast FM, airband AM. Until the terminator arrives, characterize with the antenna removed | **Decided** |
+| D7 | Auto-save a light summary of every candidate; full observation + I/Q only when investigated | **Decided** |
+| D8 | No comparison notebook. Detector = **FCME**; flatten the noise floor first (receiver profile) and exclude the DC bin, since FCME assumes a flat floor | **Decided** |
+
+## 5. Architecture (summary; the doc has the diagram)
+
+- **Three sources, one pipeline:** recording file (I/Q + SigMF), HackRF live I/Q (SoapySDR), HackRF sweep (`hackrf_sweep`, power only).
+- **Session manager:** one active mode (recording, live or scan); owns the HackRF.
+- **Receiver services:** gain control (amp/LNA/VGA), Receiver Check, antenna registry, receiver profile, health (clipping, dropped samples).
+- **Spectrum + detector → tracker** (stable IDs, candidate table, boxes on display).
+- **Investigator** (user clicks a signal): gets I/Q from the recording, the live span, or a retune; channelizes; measures edges, bandwidth, SNR and frequency offset; shows detailed views; calls the **classifier** (features + Random Forest → class, confidence, or Unknown).
+- **Observation store:** SQLite (sessions, observations, signal profiles) + SigMF I/Q files.
+- **History + analytics:** new / known / changed matching, occupancy, recording comparison.
+- **Offline dataset + training** in notebooks: generator, public datasets, labelled recordings. Split **by recording**, not by snippet.
+- Two classification layers: an ML modulation classifier, plus rule-based signal-family hypotheses later (always labelled as hypotheses).
+- "Calibration" means four separate things: one-time receiver characterization (50 Ω), the in-app Receiver Check, always-on health monitoring, and future dBm calibration.
+
+## 6. Roadmap (21 days)
+
+1. **Foundations (days 1–3):** data model + SigMF, recording import, spectrum + waterfall, session manager, API + dashboard shell, antenna registry. Notebook: processing gain. **Gate:** a recording is analysed in the dashboard.
+2. **Live + receiver (days 4–8):** HackRF live + sweep, gain controls, health, Receiver Check, Lebanon presets. Notebook: receiver characterization (50 Ω, with/without LNA). **Gate:** live view with gain and Receiver Check.
+3. **Detect + investigate (days 9–14):** FCME detector (concept notebook, no comparison) + tracker, boxes + candidate table, investigator + views, observation store, history + "first seen". **Gate:** click a signal and it is measured and saved.
+4. **Classify + deliver (days 15–21):** signal generator, ESP32 + FM recordings, features + Random Forest, Unknown threshold, real-vs-synthetic evaluation, report + demo. Notebook: features. **Gate:** classifier tested on real signals; demo ready.
+
+**After the course:** auto-classify inside the live span, occupancy analytics, recording comparison, signal-family hypotheses, automatic investigation, anomaly detection, neural-network classifier, dBm calibration. The database schema plans for these from day 1.
+
+## 7. Evidence from the old detector code (synthetic, 1 MHz span, FFT 2048)
+
+- Detector ranking was driven by **threshold choice, not algorithm**. Detection cliff (whole-band SNR): Median 12 dB → −14 dB; CA-CFAR 8 dB → about −18 dB; FCME 9 dB → −22 dB; CA-CFAR 3 dB → −26 dB with under 1% false alarms.
+- The "weak tone" was not weak: FFT processing gain is about 33 dB.
+- Median and CA-CFAR **self-mask on wideband signals** (noise estimate −46.7 vs true −60.1 dB); FCME handles this but assumes a flat floor.
+
+## 8. How to run
+
+- Env: `conda activate tayf` (a clone of `spectraiq`, plus fastapi, uvicorn, scikit-learn, plotly, sigmf, pytest). The package is installed editable (`pip install -e .`).
+- Dashboard: `python -m tayf serve`, then open http://127.0.0.1:8000. Data (database + recordings) lives in `data/` (git-ignored).
+- Synthetic test scene: `python -m tayf synth` (or the button on the home page).
+- Raw HackRF file: `python -m tayf import-raw capture.bin --fc 98e6 --fs 2e6 --antenna whip-5dbi --amp 0 --lna 16 --vga 20`
+- Tests: `pytest`.
+- Layout: `tayf/core` (data model, SigMF), `sources`, `dsp`, `session`, `store` (SQLite), `api` (FastAPI); `web/` (plain HTML/JS dashboard); `notebooks/`.
+
+## 9. Progress
+
+- 2026-10-27: repo created, decisions confirmed. Phase 1 recording path built: data model, SigMF I/O (incl. raw hackrf_transfer import), synthetic scene, Welch spectrum, SQLite store + antenna registry, session manager, FastAPI + WebSocket, dashboard (spectrum, waterfall, timeline), notebook 01. 8 tests pass; dashboard checked on the synthetic scene. Open: notebook plotting check in VS Code.
+- 2026-10-27: first real FM recording (`fm.bin`, 98.0 MHz, 2 MS/s, amp off, LNA 16, VGA 20, whip) opens and plays in the dashboard (Phase 1 gate met). Findings: no clipping, but the ADC only used values −3…+3 (gain ~20–25 dB too low; floor is quantization-limited). The "peak" at 98.0 MHz was the HackRF DC spike (drops 37 dB after DC removal), not a station. Stations seen near 97.1, 98.5, 98.9 MHz. Lessons for Phase 2: tune off-center (offset tuning) and remove DC; the Receiver Check should flag a too-low ADC level as well as clipping.

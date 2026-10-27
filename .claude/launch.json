@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "tayf",
+      "runtimeExecutable": "C:/Users/USER/radioconda/envs/tayf/python.exe",
+      "runtimeArgs": ["-m", "tayf", "serve", "--port", "8000"],
+      "port": 8000
+    }
+  ]
+}

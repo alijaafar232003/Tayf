@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tayf"
+version = "0.1.0"
+description = "RF spectrum monitoring, detection, investigation and classification with a HackRF"
+requires-python = ">=3.11"
+
+[tool.setuptools.packages.find]
+include = ["tayf*"]
+
+[tool.setuptools.package-data]
+"tayf.store" = ["schema.sql"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

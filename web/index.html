@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tayf</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#" id="home-link">Tayf <span class="ar">طيف</span></a>
+    <span id="session-badge" class="badge">No session</span>
+  </header>
+
+  <!-- Home: choose what to analyse -->
+  <main id="home" class="view">
+    <section class="card">
+      <h2>Analyze a recording</h2>
+      <table class="list" id="rec-table">
+        <thead><tr><th>Name</th><th>Center</th><th>Sample rate</th><th>Duration</th><th>Format</th><th>History</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <p class="muted" id="rec-empty">No recordings yet. Make the synthetic test scene or import a file.</p>
+      <div class="row">
+        <button id="btn-synth">Make synthetic test scene</button>
+      </div>
+      <details>
+        <summary>Import a file from disk</summary>
+        <form id="import-form" class="grid-form">
+          <label class="wide">Path <input name="path" required placeholder="C:\...\capture.sigmf-meta or raw .bin/.iq"></label>
+          <p class="muted wide">For a raw file (e.g. from hackrf_transfer) also fill in the receiver settings below. A SigMF file needs only the path.</p>
+          <label>Center (MHz) <input name="fc_mhz" type="number" step="any"></label>
+          <label>Sample rate (MS/s) <input name="fs_msps" type="number" step="any"></label>
+          <label>Format
+            <select name="datatype"><option>ci8</option><option>cu8</option><option>ci16_le</option><option>cf32_le</option></select>
+          </label>
+          <label>Antenna <select name="antenna_id" id="import-antenna"></select></label>
+          <label>Amp <select name="amp"><option value="">unknown</option><option value="0">off</option><option value="1">on</option></select></label>
+          <label>LNA gain (dB) <input name="lna" type="number" step="8" min="0" max="40"></label>
+          <label>VGA gain (dB) <input name="vga" type="number" step="2" min="0" max="62"></label>
+          <label class="wide">Description <input name="description"></label>
+          <div class="wide"><button type="submit">Import</button> <span id="import-msg" class="muted"></span></div>
+        </form>
+      </details>
+    </section>
+
+    <section class="card">
+      <h2>Live with HackRF</h2>
+      <p class="muted">Arrives in Phase 2.</p>
+    </section>
+
+    <section class="card">
+      <h2>Antennas</h2>
+      <table class="list" id="ant-table">
+        <thead><tr><th>Name</th><th>Range</th><th>Claimed gain</th><th>Uses</th><th>Notes</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+    <section class="card">
+      <h2>Recent sessions</h2>
+      <table class="list" id="sess-table">
+        <thead><tr><th>Started (UTC)</th><th>Mode</th><th>Recording</th><th>Ended</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+  </main>
+
+  <!-- Analysis: spectrum, waterfall, timeline -->
+  <main id="analysis" class="view hidden">
+    <div class="toolbar">
+      <button id="btn-back">&larr; Home</button>
+      <strong id="an-title"></strong>
+      <span id="an-info" class="muted"></span>
+      <span class="spacer"></span>
+      <button id="btn-play">Play</button>
+      <label>Speed
+        <select id="sel-speed">
+          <option value="0.25">0.25×</option><option value="0.5">0.5×</option>
+          <option value="1" selected>1×</option><option value="2">2×</option>
+          <option value="4">4×</option><option value="8">8×</option>
+        </select>
+      </label>
+      <label>FFT size
+        <select id="sel-nfft">
+          <option>512</option><option>1024</option><option selected>2048</option>
+          <option>4096</option><option>8192</option><option>16384</option>
+        </select>
+      </label>
+      <label>dB range
+        <input id="db-min" type="number" step="5" placeholder="auto"> to
+        <input id="db-max" type="number" step="5" placeholder="auto">
+      </label>
+      <label><input type="checkbox" id="chk-truth" checked> Annotations</label>
+    </div>
+
+    <div class="readout">
+      <span>Time <b id="ro-time">0.000 s</b></span>
+      <span>RBW <b id="ro-rbw">–</b></span>
+      <span>Cursor <b id="ro-cursor">–</b></span>
+      <span>Noise floor (median) <b id="ro-floor">–</b></span>
+    </div>
+
+    <div class="plot">
+      <canvas id="cv-spectrum"></canvas>
+    </div>
+    <div class="plot">
+      <canvas id="cv-waterfall"></canvas>
+    </div>
+    <div class="plot timeline">
+      <div class="muted small">Whole recording (time →, frequency ↑). Click to jump.</div>
+      <canvas id="cv-overview"></canvas>
+    </div>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
