@@ -11,13 +11,16 @@ signal you are looking at. The spectrum is drawn at true frequencies.
 """
 from __future__ import annotations
 
+import queue
 import threading
+import time
 from datetime import timedelta
+from pathlib import Path
 
 import numpy as np
 
 from ..core.models import IQBlock, ReceiverSettings, utc_now
-from ..core.sigmf_io import to_complex
+from ..core.sigmf_io import SigMFWriter, to_complex
 from .radio import FREQ_RANGE, Gains, Radio
 
 SETTLE_S = 0.01          # samples just after a retune or gain change are discarded
@@ -41,6 +44,7 @@ class LiveSource:
         self.buffer_s = buffer_s
         self.gains = gains
         self.overflows = 0                # times the radio reported lost samples
+        self._rec: SigMFWriter | None = None
         self._lock = threading.Lock()
         self._running = False
         self._thread: threading.Thread | None = None
@@ -75,6 +79,9 @@ class LiveSource:
     def _invalidate(self) -> None:
         """Discard samples taken before a setting change, plus a short settling time."""
         self._valid_from = self._total + int(SETTLE_S * self.sample_rate_hz)
+        if self._rec is not None:
+            # New capture segment in the recording, from the first settled sample on.
+            self._rec.new_capture(self._valid_from - self._rec_start_total, self.settings)
 
     def _apply_frequency(self) -> None:
         self.radio.set_frequency(self.lo_hz)
@@ -141,6 +148,8 @@ class LiveSource:
                     self._buf[start:] = chunk[:k]
                     self._buf[:end - len(self._buf)] = chunk[k:2 * n]
                 self._total += n
+                if self._rec is not None:
+                    self._queue_for_recording(chunk[:2 * n])
 
     def latest(self, n: int) -> IQBlock | None:
         """The newest n samples, or None if fewer than n have arrived since the
@@ -160,6 +169,66 @@ class LiveSource:
     def read_block(self, n_samples: int) -> IQBlock | None:
         return self.latest(n_samples)
 
+    # --- recording ------------------------------------------------------
+    # The reader thread only hands raw chunks to a queue; a separate writer thread
+    # does the disk writes, so a slow disk never stalls the USB stream.
+    @property
+    def recording(self) -> bool:
+        return self._rec is not None
+
+    def start_recording(self, base_path, description: str = "") -> SigMFWriter:
+        with self._lock:
+            if self._rec is not None:
+                raise RuntimeError("Already recording")
+            writer = SigMFWriter(base_path, self.settings, "ci8", utc_now(), description)
+            writer.extra_global["tayf:offset_tuning_hz"] = self.offset_hz
+            self._rec_queue: queue.Queue = queue.Queue()
+            self._rec_queued = 0              # samples waiting in the queue
+            self.rec_dropped = 0              # samples lost because the disk could not keep up
+            self._rec_start_total = self._total
+            self._rec_t0 = time.perf_counter()
+            self._rec = writer
+        self._rec_thread = threading.Thread(target=self._writer, args=(writer,),
+                                            name="recording-writer", daemon=True)
+        self._rec_thread.start()
+        return writer
+
+    def _queue_for_recording(self, raw: np.ndarray) -> None:
+        if self._rec_queued > 2 * self.sample_rate_hz:      # > 2 s behind: disk too slow
+            self.rec_dropped += len(raw) // 2
+            return
+        self._rec_queued += len(raw) // 2
+        self._rec_queue.put(raw.copy())
+
+    def _writer(self, writer: SigMFWriter) -> None:
+        while True:
+            raw = self._rec_queue.get()
+            if raw is None:
+                return
+            writer.write_raw(raw)
+            self._rec_queued -= len(raw) // 2
+
+    def recording_status(self) -> dict | None:
+        w = self._rec
+        if w is None:
+            return None
+        return {"name": w.meta_path.name.removesuffix(".sigmf-meta"),
+                "seconds": round(time.perf_counter() - self._rec_t0, 1),
+                "mbytes": round(w.n_bytes / 1e6, 1), "segments": len(w.captures),
+                "dropped_samples": self.rec_dropped}
+
+    def stop_recording(self) -> Path | None:
+        """Finish the recording and return its meta path (None if not recording)."""
+        with self._lock:
+            writer, self._rec = self._rec, None
+        if writer is None:
+            return None
+        self._rec_queue.put(None)
+        self._rec_thread.join()
+        if self.rec_dropped:
+            writer.extra_global["tayf:dropped_samples"] = self.rec_dropped
+        return writer.close()
+
     def stop(self) -> None:
         self._running = False
         if self._thread:
@@ -168,5 +237,6 @@ class LiveSource:
         self.radio.stop()
 
     def close(self) -> None:
+        self.stop_recording()
         self.stop()
         self.radio.close()

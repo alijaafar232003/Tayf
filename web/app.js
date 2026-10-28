@@ -342,6 +342,7 @@ function setStatus(st) {
     $("ro-ovf").classList.toggle("warn", st.overflows > 0);
     $("an-info").textContent = `${fmtRate(st.sample_rate_hz)} · total gain ${st.gains.total_db} dB`;
     $("ant-warn").textContent = antennaWarning(st.antenna_id, st.tuned_hz);
+    showRecording(st);
   } else {
     $("sel-speed").value = String(st.speed);
     if (st.session_id !== prevId) {
@@ -364,6 +365,23 @@ function showHealth(st) {
   clip.classList.toggle("warn", h.level_hint === "clipping");
 }
 
+function showRecording(st) {
+  const rec = st.recording, btn = $("btn-rec"), info = $("rec-info");
+  btn.classList.toggle("on", !!rec);
+  info.classList.toggle("on", !!rec);
+  if (rec) {
+    btn.innerHTML = "&#9632; Stop";
+    info.textContent = `REC ${rec.seconds.toFixed(1)} s · ${rec.mbytes.toFixed(1)} MB · ` +
+      `${rec.segments} segment${rec.segments > 1 ? "s" : ""}` +
+      (rec.dropped_samples ? ` · ${rec.dropped_samples} samples lost (disk too slow)` : "") +
+      " · changing the sample rate stops the recording";
+  } else {
+    btn.innerHTML = "&#9679; Record";
+    const s = st.last_saved;
+    info.textContent = s ? `Saved ${s.name} (${s.seconds} s, ${s.mbytes} MB): it is in the recordings list on the home page.` : "";
+  }
+}
+
 function antennaWarning(antennaId, hz) {
   const a = S.antennas.find((x) => x.id === antennaId);
   if (!a) return "No antenna selected";
@@ -380,6 +398,10 @@ $("btn-play").onclick = () => control({ playing: !S.status?.playing });
 $("sel-speed").onchange = (e) => control({ speed: parseFloat(e.target.value) });
 $("sel-nfft").onchange = (e) => control({ nfft: parseInt(e.target.value) });
 $("chk-dc").onchange = (e) => control({ dc_remove: e.target.checked });
+$("btn-rec").onclick = async () => {
+  try { setStatus(await api("/api/session/record", { method: "POST", body: { on: !S.status?.recording } })); }
+  catch (e) { alert(e.message); }
+};
 
 // ---------- live tuning ----------
 // Every way of tuning (drag, click, wheel, typing) first moves the view to where

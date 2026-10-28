@@ -67,6 +67,10 @@ class LiveIn(BaseModel):
     offset_tuning: bool = True
 
 
+class RecordIn(BaseModel):
+    on: bool
+
+
 class ControlIn(BaseModel):
     playing: bool | None = None
     nfft: int | None = None
@@ -96,7 +100,7 @@ def create_app(data_dir: str | Path = "data") -> FastAPI:
     rec_dir.mkdir(parents=True, exist_ok=True)
     store = Store(data_dir / "tayf.db")
     store.scan_folder(rec_dir)
-    manager = SessionManager(store)
+    manager = SessionManager(store, rec_dir)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -204,6 +208,17 @@ def create_app(data_dir: str | Path = "data") -> FastAPI:
             raise HTTPException(400, str(e))
         except RuntimeError as e:               # no device, device busy
             raise HTTPException(503, f"Could not open the radio: {e}")
+        return manager.status()
+
+    @app.post("/api/session/record")
+    def record(body: RecordIn):
+        try:
+            if body.on:
+                manager.start_recording()
+            else:
+                manager.stop_recording()
+        except RuntimeError as e:
+            raise HTTPException(409, str(e))
         return manager.status()
 
     @app.delete("/api/session")

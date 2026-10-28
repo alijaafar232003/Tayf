@@ -7,10 +7,12 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import numpy as np
 
-from ..core.models import IQBlock, SpectrumFrame
+from ..core.models import IQBlock, SpectrumFrame, utc_now
+from ..core.sigmf_io import SigMFRecording
 from ..dsp.dc import remove_dc
 from ..dsp.spectrum import overview_rows, spectrum_frame
 from ..sources.live import LiveSource
@@ -56,8 +58,10 @@ def measure_health(block: IQBlock) -> dict:
 
 
 class SessionManager:
-    def __init__(self, store: Store):
+    def __init__(self, store: Store, recordings_dir: str | Path = "data/recordings"):
         self.store = store
+        self.recordings_dir = Path(recordings_dir)
+        self.last_saved: dict | None = None     # the most recent recording made from live
         self.active: ActiveSession | None = None
         self.health: dict = {}
         self.rev = 0                    # bumps on every change, so paused views refresh
@@ -100,6 +104,8 @@ class SessionManager:
     def close(self) -> None:
         with self._lock:
             if self.active:
+                if self.active.mode == "live":
+                    self.stop_recording()
                 self.active.source.close()
                 self.store.end_session(self.active.id)
                 self.active = None
@@ -108,6 +114,36 @@ class SessionManager:
 
     def _changed(self) -> None:
         self.rev += 1
+
+    # --- recording from live --------------------------------------------
+    def start_recording(self) -> dict:
+        """Save everything the radio delivers, raw, as a SigMF recording."""
+        with self._lock:
+            a = self._require()
+            if a.mode != "live":
+                raise RuntimeError("Recording is only available in live mode")
+            src = a.source
+            stamp = utc_now().strftime("%Y%m%d_%H%M%S")
+            name = f"live_{stamp}_{src.tuned_hz / 1e3:.0f}kHz"     # no dots: they look like extensions
+            src.start_recording(self.recordings_dir / name,
+                                description=f"Recorded live, tuned to {src.tuned_hz / 1e6:.3f} MHz")
+            self._changed()
+            return src.recording_status()
+
+    def stop_recording(self) -> dict | None:
+        """Finish the recording and add it to the recordings list."""
+        with self._lock:
+            a = self.active
+            if a is None or a.mode != "live" or not a.source.recording:
+                return None
+            meta = a.source.stop_recording()
+            rec = SigMFRecording.open(meta)
+            rid = self.store.add_recording(rec)
+            self.last_saved = {"id": rid, "name": rec.name, "seconds": round(rec.duration_s, 1),
+                               "mbytes": round(rec.n_samples * 2 / 1e6, 1),
+                               "segments": len(rec.meta["captures"])}
+            self._changed()
+            return self.last_saved
 
     def status(self) -> dict:
         with self._lock:
@@ -133,6 +169,7 @@ class SessionManager:
                     "name": f"Live: {src.radio.name}", "tuned_hz": src.tuned_hz,
                     "offset_hz": src.offset_hz, "offset_tuning": src.offset_tuning,
                     "antenna_id": src.antenna_id, "overflows": src.overflows,
+                    "recording": src.recording_status(), "last_saved": self.last_saved,
                     "gains": {"amp": src.gains.amp, "lna_db": src.gains.lna_db,
                               "vga_db": src.gains.vga_db, "total_db": src.gains.total_db},
                 })
@@ -162,7 +199,9 @@ class SessionManager:
                 if "sample_rate_hz" in cmd:
                     if float(cmd["sample_rate_hz"]) not in SAMPLE_RATES:
                         raise ValueError(f"sample_rate_hz must be one of {SAMPLE_RATES}")
-                    src.set_sample_rate(float(cmd["sample_rate_hz"]))
+                    if float(cmd["sample_rate_hz"]) != src.sample_rate_hz:
+                        self.stop_recording()   # one recording file has one sample rate
+                        src.set_sample_rate(float(cmd["sample_rate_hz"]))
                 if "center_hz" in cmd:
                     src.tune(float(cmd["center_hz"]))
                 if "offset_tuning" in cmd:

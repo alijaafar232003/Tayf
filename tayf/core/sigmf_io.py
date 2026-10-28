@@ -122,6 +122,67 @@ def write_recording(base_path: str | Path, samples: np.ndarray | Iterable[np.nda
     return meta
 
 
+class SigMFWriter:
+    """Write a recording while it happens: raw chunks go straight to the data file,
+    and the meta file is (re)written at each new capture segment and at close.
+
+    A capture segment starts whenever the frequency or gains change mid-recording,
+    so one file can hold a whole tuning session with correct metadata for every part."""
+
+    def __init__(self, base_path: str | Path, settings: ReceiverSettings,
+                 datatype: str = "ci8", start_time: datetime | None = None,
+                 description: str = ""):
+        self.meta_path = meta_path_for(base_path)
+        self.data_path = self.meta_path.with_suffix(".sigmf-data")
+        self.meta_path.parent.mkdir(parents=True, exist_ok=True)
+        self.datatype = datatype
+        self.settings = settings
+        self.start_time = start_time or utc_now()
+        self.description = description
+        self.n_samples = 0
+        self.extra_global: dict = {}
+        self.captures: list[dict] = []
+        self._f = open(self.data_path, "wb")
+        self.new_capture(0, settings)
+
+    def new_capture(self, sample_start: int, settings: ReceiverSettings) -> None:
+        cap = {
+            "core:sample_start": int(sample_start),
+            "core:frequency": settings.center_freq_hz,
+            "core:datetime": _iso(self.start_time + timedelta(
+                seconds=sample_start / self.settings.sample_rate_hz)),
+        }
+        for key in ("amp_on", "lna_gain_db", "vga_gain_db", "antenna_id"):
+            value = getattr(settings, key)
+            if value is not None:
+                cap[f"tayf:{key}"] = value
+        if self.captures and self.captures[-1]["core:sample_start"] == cap["core:sample_start"]:
+            self.captures[-1] = cap                 # two changes at once: keep the last
+        else:
+            self.captures.append(cap)
+        self._write_meta()
+
+    def write_raw(self, raw: np.ndarray) -> None:
+        """Interleaved components in this recording's datatype (e.g. int8 for ci8)."""
+        raw.tofile(self._f)
+        self.n_samples += len(raw) // 2
+
+    @property
+    def n_bytes(self) -> int:
+        return self.n_samples * _bytes_per_sample(self.datatype)
+
+    def _write_meta(self) -> None:
+        m = build_meta(self.settings, self.datatype, self.start_time, self.description)
+        m["global"].update(self.extra_global)
+        m["captures"] = self.captures
+        self.meta_path.write_text(json.dumps(m, indent=2))
+
+    def close(self) -> Path:
+        self._f.close()
+        self._write_meta()
+        return self.meta_path
+
+
 def import_raw(data_path: str | Path, settings: ReceiverSettings, datatype: str = "ci8",
                start_time: datetime | None = None, description: str = "") -> Path:
     """Describe an existing raw I/Q file (e.g. from hackrf_transfer) with a SigMF
@@ -199,6 +260,15 @@ class SigMFRecording:
         """Can this recording be compared with history? Needs gains and antenna."""
         return self.settings.gains_known and self.settings.antenna_id is not None
 
+    def frequency_at(self, sample: int) -> float:
+        """Center frequency of the capture segment holding `sample` (a recording made
+        while retuning has several segments)."""
+        freq = self.settings.center_freq_hz
+        for cap in self.meta.get("captures", []):
+            if cap.get("core:sample_start", 0) <= sample and "core:frequency" in cap:
+                freq = float(cap["core:frequency"])
+        return freq
+
     def read(self, start: int, count: int) -> IQBlock:
         """Read `count` samples from sample index `start` (clipped to the file)."""
         start = max(0, min(int(start), self.n_samples))
@@ -209,7 +279,7 @@ class SigMFRecording:
             if count else np.empty(0, dtype=comp)
         s = self.settings
         return IQBlock(to_complex(np.asarray(raw), self.datatype), s.sample_rate_hz,
-                       s.center_freq_hz,
+                       self.frequency_at(start),
                        self.start_time + timedelta(seconds=start / s.sample_rate_hz), start)
 
     def blocks(self, block_size: int, start: int = 0) -> Iterator[IQBlock]:

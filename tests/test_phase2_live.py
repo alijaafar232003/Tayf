@@ -7,6 +7,7 @@ import pytest
 from tayf.dsp.dc import remove_dc
 from tayf.session.manager import SessionManager, measure_health
 from tayf.core.models import IQBlock, utc_now
+from tayf.core.sigmf_io import SigMFRecording
 from tayf.sources.live import offset_for
 from tayf.store.db import Store
 
@@ -73,6 +74,32 @@ def test_health_flags():
     hot = IQBlock(np.full(1000, 1.0 + 1j), 2e6, 0, utc_now())
     assert measure_health(quiet)["level_hint"] == "low"
     assert measure_health(hot)["level_hint"] == "clipping"
+
+
+def test_record_from_live_with_retune(tmp_path):
+    m = SessionManager(Store(tmp_path / "t.db"), tmp_path / "rec")
+    try:
+        m.open_live("sim", center_hz=98.5e6, sample_rate_hz=2e6)
+        time.sleep(0.2)
+        m.start_recording()
+        time.sleep(0.6)
+        m.control({"center_hz": 101.3e6})
+        time.sleep(0.6)
+        saved = m.stop_recording()
+        assert saved["segments"] == 2 and "." not in saved["name"]
+        rec = SigMFRecording.open(tmp_path / "rec" / f"{saved['name']}.sigmf-meta")
+        assert rec.duration_s == pytest.approx(1.2, abs=0.3)
+        caps = rec.meta["captures"]
+        assert caps[0]["core:frequency"] == 98.7e6 and caps[1]["core:frequency"] == 101.5e6
+        assert rec.read(caps[1]["core:sample_start"] + 10, 100).center_freq_hz == 101.5e6
+        assert m.store.recordings()[0]["name"] == saved["name"]
+        # A sample-rate change ends the recording (one file, one rate)
+        m.start_recording()
+        time.sleep(0.3)
+        m.control({"sample_rate_hz": 4e6})
+        assert m.status()["recording"] is None and len(m.store.recordings()) == 2
+    finally:
+        m.close()
 
 
 def test_live_api_with_sim(tmp_path):
