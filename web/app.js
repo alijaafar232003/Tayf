@@ -46,6 +46,8 @@ const S = {
   auto: { lo: -100, hi: -20, init: false },
   overview: null,       // {canvas, meta}
   ws: null,
+  antennas: [],         // antenna registry, for range warnings
+  drag: null,           // live drag-to-tune state
 };
 const M = { left: 52, right: 12, top: 8, bottom: 22 };   // plot margins (CSS px)
 
@@ -68,13 +70,28 @@ function spanOf(frame) {
   const n = frame.power.length;
   return [frame.f0 - frame.df / 2, frame.f0 + frame.df * (n - 0.5)];
 }
-// Max-hold reduce bins to `cols` pixels so narrow signals stay visible.
-function reduceTo(power, cols) {
-  const out = new Float32Array(cols), n = power.length;
+const loOf = (frame) => frame.f0 + frame.df * frame.power.length / 2;   // center bin = LO
+// The frequency window on screen. While a retune is pending (dragging, wheel, click)
+// it is already the new window, so the view follows the mouse without waiting
+// for the radio; the old spectrum slides along until new data arrives.
+function viewSpan() {
+  const [lo, hi] = spanOf(S.frame);
+  if (S.pending == null) return [lo, hi];
+  const half = (hi - lo) / 2;
+  return [S.pending.lo - half, S.pending.lo + half];
+}
+// Resample a frame into `cols` pixel columns covering [vLo, vHi], max-hold so narrow
+// signals stay visible. Columns with no data (outside the frame) are NaN.
+function resample(frame, vLo, vHi, cols) {
+  const out = new Float32Array(cols), n = frame.power.length, p = frame.power;
+  const binOf = (hz) => Math.floor((hz - frame.f0) / frame.df + 0.5);
   for (let c = 0; c < cols; c++) {
-    const a = Math.floor(c * n / cols), b = Math.max(a + 1, Math.floor((c + 1) * n / cols));
+    let a = binOf(vLo + (vHi - vLo) * c / cols), b = binOf(vLo + (vHi - vLo) * (c + 1) / cols);
+    if (b <= a) b = a + 1;
+    if (b <= 0 || a >= n) { out[c] = NaN; continue; }
+    a = Math.max(0, a); b = Math.min(n, b);
     let m = -Infinity;
-    for (let i = a; i < b; i++) if (power[i] > m) m = power[i];
+    for (let i = a; i < b; i++) if (p[i] > m) m = p[i];
     out[c] = m;
   }
   return out;
@@ -90,7 +107,7 @@ function drawSpectrum() {
   const ctx = cv.getContext("2d"), b = plotBox(cv), f = S.frame;
   ctx.clearRect(0, 0, cv.width, cv.height);
   if (!f) return;
-  const [lo, hi] = dbRange(), [fLo, fHi] = spanOf(f);
+  const [lo, hi] = dbRange(), [fLo, fHi] = viewSpan();
   const yOf = (db) => b.y + b.h * (1 - (db - lo) / (hi - lo));
   const xOf = (hz) => b.x + b.w * (hz - fLo) / (fHi - fLo);
   const css = getComputedStyle(document.documentElement);
@@ -128,36 +145,67 @@ function drawSpectrum() {
 
   // trace
   const cols = Math.max(1, Math.floor(b.w));
-  const p = reduceTo(f.power, cols);
+  const p = resample(f, fLo, fHi, cols);
   ctx.save(); ctx.beginPath(); ctx.rect(b.x, b.y, b.w, b.h); ctx.clip();
   ctx.strokeStyle = css.getPropertyValue("--trace"); ctx.lineWidth = 1.2 * b.r;
   ctx.beginPath();
+  let pen = false;
   for (let c = 0; c < cols; c++) {
+    if (isNaN(p[c])) { pen = false; continue; }          // no data here yet
     const x = b.x + c * b.w / cols, y = yOf(p[c]);
-    c ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+    pen ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+    pen = true;
   }
   ctx.stroke();
   if (S.cursorHz != null) {
     ctx.strokeStyle = css.getPropertyValue("--accent"); ctx.lineWidth = 1;
     const x = xOf(S.cursorHz); ctx.beginPath(); ctx.moveTo(x, b.y); ctx.lineTo(x, b.y + b.h); ctx.stroke();
   }
+  // Live: the frequency you tuned to (the LO sits offset_hz away from it)
+  if (S.status?.mode === "live") {
+    const tuned = S.pending ? S.pending.tuned : S.status.tuned_hz;
+    ctx.strokeStyle = css.getPropertyValue("--tuned"); ctx.lineWidth = 1.5 * b.r; ctx.setLineDash([4 * b.r, 3 * b.r]);
+    const x = xOf(tuned); ctx.beginPath(); ctx.moveTo(x, b.y); ctx.lineTo(x, b.y + b.h); ctx.stroke();
+    ctx.setLineDash([]);
+  }
   ctx.restore();
 }
 
 // ---------- waterfall ----------
-const WF = { canvas: document.createElement("canvas") };
+// The waterfall image covers the frequency window [WF.lo, WF.hi]. After a retune
+// the image slides sideways so every past row stays at its true frequency
+// (like SDR++), instead of being cleared.
+const WF = { canvas: document.createElement("canvas"), lo: null, hi: null };
 function resetWaterfall() {
   const cv = $("cv-waterfall"); fitCanvas(cv);
   const b = plotBox(cv);
   WF.canvas.width = Math.max(1, Math.floor(b.w));
   WF.canvas.height = Math.max(1, Math.floor(cv.height - b.y - 4 * b.r));
+  WF.lo = WF.hi = null;
   const c = WF.canvas.getContext("2d"); c.fillStyle = "#000"; c.fillRect(0, 0, WF.canvas.width, WF.canvas.height);
   drawWaterfall();
 }
+function alignWaterfall(lo, hi) {
+  if (WF.lo == null) { WF.lo = lo; WF.hi = hi; return; }
+  if (Math.abs((hi - lo) - (WF.hi - WF.lo)) > 1) {        // span changed (sample rate): start over
+    resetWaterfall(); WF.lo = lo; WF.hi = hi; return;
+  }
+  const w = WF.canvas.width, h = WF.canvas.height, c = WF.canvas.getContext("2d");
+  const hzPerPx = (hi - lo) / w;
+  const dx = Math.round((WF.lo - lo) / hzPerPx);          // whole pixels the old image moves
+  if (dx === 0) return;
+  c.drawImage(WF.canvas, 0, 0, w, h, dx, 0, w, h);
+  c.fillStyle = "#000";
+  dx > 0 ? c.fillRect(0, 0, dx, h) : c.fillRect(w + dx, 0, -dx, h);
+  // The image moved by a whole number of pixels; keep its window exact so new rows line up.
+  WF.lo -= dx * hzPerPx; WF.hi = WF.lo + (hi - lo);
+}
 function pushWaterfallRow(frame) {
+  const [fLo, fHi] = spanOf(frame);
+  alignWaterfall(fLo, fHi);
   const w = WF.canvas.width, h = WF.canvas.height, c = WF.canvas.getContext("2d");
   c.drawImage(WF.canvas, 0, 0, w, h - 1, 0, 1, w, h - 1);     // scroll down by one row
-  const [lo, hi] = dbRange(), p = reduceTo(frame.power, w);
+  const [lo, hi] = dbRange(), p = resample(frame, WF.lo, WF.hi, w);
   const img = c.createImageData(w, 1);
   for (let i = 0; i < w; i++) {
     const k = Math.max(0, Math.min(255, Math.round(255 * (p[i] - lo) / (hi - lo))));
@@ -171,7 +219,16 @@ function drawWaterfall() {
   const ctx = cv.getContext("2d"), b = plotBox(cv);
   ctx.clearRect(0, 0, cv.width, cv.height);
   ctx.imageSmoothingEnabled = false;
-  ctx.drawImage(WF.canvas, b.x, b.y, b.w, WF.canvas.height);
+  // Place the image at its own frequencies inside the current view (shifts while tuning).
+  let x = b.x;
+  if (S.frame && WF.lo != null) {
+    const [vLo, vHi] = viewSpan();
+    x = b.x + (WF.lo - vLo) / (vHi - vLo) * b.w;
+  }
+  ctx.save(); ctx.beginPath(); ctx.rect(b.x, b.y, b.w, WF.canvas.height); ctx.clip();
+  ctx.fillStyle = "#000"; ctx.fillRect(b.x, b.y, b.w, WF.canvas.height);
+  ctx.drawImage(WF.canvas, x, b.y, b.w, WF.canvas.height);
+  ctx.restore();
   ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue("--muted");
   ctx.font = `${11 * b.r}px system-ui`; ctx.textAlign = "right";
   ctx.fillText("now", b.x - 6 * b.r, b.y + 10 * b.r);
@@ -221,6 +278,9 @@ function onFrame(buf) {
   const h = new Float64Array(buf, 0, 4);
   const frame = { offset: h[0], f0: h[1], df: h[2], rbw: h[3], power: new Float32Array(buf, 32) };
   S.frame = frame;
+  // The retune we asked for has arrived: stop showing the predicted view.
+  if (S.pending && !S.drag && !S.pending.unsent && Math.abs(loOf(frame) - S.pending.lo) < 2 * frame.df) S.pending = null;
+  if (S.pending && performance.now() - S.pending.t > 2000 && !S.drag) S.pending = null;   // give up waiting
   // Auto dB range: floor (median) - 10 dB up to peak + 5 dB, smoothed so it doesn't jump.
   const floor = median(frame.power);
   let peak = -Infinity; for (const v of frame.power) if (v > peak) peak = v;
@@ -259,16 +319,56 @@ function setStatus(st) {
   badge.textContent = st.active ? `Session ${st.session_id}: ${st.mode}` : "No session";
   badge.classList.toggle("on", !!st.active);
   if (!st.active) return;
-  $("btn-play").textContent = st.playing ? "Pause" : "Play";
-  $("sel-speed").value = String(st.speed);
+  const live = st.mode === "live";
+  $("analysis").classList.toggle("mode-live", live);
+  $("analysis").classList.toggle("mode-recording", !live);
+  for (const id of ["cv-spectrum", "cv-waterfall"]) $(id).classList.toggle("tunable", live);
+  $("btn-play").textContent = live ? (st.playing ? "Freeze" : "Run") : (st.playing ? "Pause" : "Play");
   $("sel-nfft").value = String(st.nfft);
-  if (st.session_id !== prevId) {
-    $("an-title").textContent = st.name;
-    const s = st.settings;
-    const gains = s.lna_gain_db == null ? "gains unknown" : `amp ${s.amp_on ? "on" : "off"}, LNA ${s.lna_gain_db} dB, VGA ${s.vga_gain_db} dB`;
-    $("an-info").textContent = `${fmtHz(st.center_freq_hz)} · ${fmtRate(st.sample_rate_hz)} · ${fmtDur(st.duration_s)} · ${gains}` +
-      (st.comparable ? "" : " · not comparable with history");
+  $("chk-dc").checked = st.dc_remove;
+  showHealth(st);
+  $("an-title").textContent = st.name;
+  if (live) {
+    if (document.activeElement !== $("in-freq") && !S.pending) $("in-freq").value = (st.tuned_hz / 1e6).toFixed(4);
+    $("sel-rate").value = String(st.sample_rate_hz);
+    $("chk-amp").checked = st.gains.amp;
+    $("sel-lna").value = String(st.gains.lna_db);
+    $("rng-vga").value = st.gains.vga_db; $("vga-val").textContent = st.gains.vga_db;
+    $("chk-offset").checked = st.offset_tuning;
+    $("sel-antenna").value = st.antenna_id || "";
+    $("ro-tuned").textContent = fmtHz(st.tuned_hz, 4);
+    $("ro-lo").textContent = st.offset_hz ? `${fmtHz(st.center_freq_hz, 4)} (offset +${fmtHz(st.offset_hz, 0)})` : fmtHz(st.center_freq_hz, 4);
+    $("ro-ovf").textContent = st.overflows;
+    $("ro-ovf").classList.toggle("warn", st.overflows > 0);
+    $("an-info").textContent = `${fmtRate(st.sample_rate_hz)} · total gain ${st.gains.total_db} dB`;
+    $("ant-warn").textContent = antennaWarning(st.antenna_id, st.tuned_hz);
+  } else {
+    $("sel-speed").value = String(st.speed);
+    if (st.session_id !== prevId) {
+      const s = st.settings;
+      const gains = s.lna_gain_db == null ? "gains unknown" : `amp ${s.amp_on ? "on" : "off"}, LNA ${s.lna_gain_db} dB, VGA ${s.vga_gain_db} dB`;
+      $("an-info").textContent = `${fmtHz(st.center_freq_hz)} · ${fmtRate(st.sample_rate_hz)} · ${fmtDur(st.duration_s)} · ${gains}` +
+        (st.comparable ? "" : " · not comparable with history");
+    }
   }
+}
+
+function showHealth(st) {
+  const h = st.health || {};
+  if (h.level_dbfs == null) return;
+  const lvl = $("ro-level"), clip = $("ro-clip");
+  const hint = { ok: "", low: " (low: raise the gain)", clipping: " (clipping: lower the gain)" }[h.level_hint];
+  lvl.textContent = `${h.level_dbfs.toFixed(1)} dBFS${h.level_hint === "low" ? hint : ""}`;
+  clip.textContent = `${h.clip_pct.toFixed(2)} %${h.level_hint === "clipping" ? hint : ""}`;
+  lvl.classList.toggle("warn", h.level_hint === "low");
+  clip.classList.toggle("warn", h.level_hint === "clipping");
+}
+
+function antennaWarning(antennaId, hz) {
+  const a = S.antennas.find((x) => x.id === antennaId);
+  if (!a) return "No antenna selected";
+  if (hz < a.freq_min_hz || hz > a.freq_max_hz) return `${a.name} covers ${fmtHz(a.freq_min_hz, 1)} – ${fmtHz(a.freq_max_hz, 1)}: outside its range`;
+  return "";
 }
 
 // ---------- interactions ----------
@@ -279,6 +379,87 @@ async function control(body) {
 $("btn-play").onclick = () => control({ playing: !S.status?.playing });
 $("sel-speed").onchange = (e) => control({ speed: parseFloat(e.target.value) });
 $("sel-nfft").onchange = (e) => control({ nfft: parseInt(e.target.value) });
+$("chk-dc").onchange = (e) => control({ dc_remove: e.target.checked });
+
+// ---------- live tuning ----------
+// Every way of tuning (drag, click, wheel, typing) first moves the view to where
+// the radio is going (S.pending), then sends the retune. The view follows the mouse
+// at once; retunes are rate-limited to what the HackRF can do (~60 ms each).
+const RETUNE_MS = 100;
+let lastTuneSent = 0, tuneTimer = null;
+const clampHz = (hz) => Math.min(6e9 - 2e7, Math.max(1e6, hz));
+function setPending(tuned) {
+  tuned = clampHz(tuned);
+  const offset = S.status.offset_tuning ? S.status.offset_hz : 0;
+  S.pending = { tuned, lo: tuned + offset, t: performance.now(), unsent: true };
+  $("in-freq").value = (tuned / 1e6).toFixed(4);
+  scheduleDraw();
+}
+function sendPending(now = false) {
+  clearTimeout(tuneTimer);
+  const wait = now ? 0 : Math.max(0, RETUNE_MS - (performance.now() - lastTuneSent));
+  tuneTimer = setTimeout(() => {
+    if (!S.pending) return;
+    lastTuneSent = performance.now();
+    S.pending.unsent = false;
+    control({ center_hz: Math.round(S.pending.tuned) });
+  }, wait);
+}
+const tuneTo = (hz) => { setPending(hz); sendPending(true); };
+const currentTuned = () => (S.pending ? S.pending.tuned : S.status.tuned_hz);
+$("in-freq").onchange = (e) => { const v = parseFloat(e.target.value); if (!isNaN(v)) tuneTo(v * 1e6); };
+$("sel-rate").onchange = (e) => control({ sample_rate_hz: parseFloat(e.target.value) });
+$("chk-amp").onchange = (e) => control({ amp: e.target.checked });
+$("sel-lna").onchange = (e) => control({ lna_db: parseInt(e.target.value) });
+$("rng-vga").oninput = (e) => { $("vga-val").textContent = e.target.value; };
+$("rng-vga").onchange = (e) => control({ vga_db: parseInt(e.target.value) });
+$("chk-offset").onchange = (e) => control({ offset_tuning: e.target.checked });
+$("sel-antenna").onchange = (e) => control({ antenna_id: e.target.value });
+
+// Mouse on the spectrum or waterfall (live only):
+//  - drag sideways: the band moves with the mouse, like dragging a map
+//  - click: tune to the clicked frequency (the dashed line jumps there)
+//  - wheel: one step per notch (Shift = 10x finer); quick notches add up
+function hzAtMouse(cv, e) {
+  const b = plotBox(cv), x = (e.clientX - cv.getBoundingClientRect().left) * b.r;
+  const [vLo, vHi] = viewSpan();
+  return vLo + (vHi - vLo) * (x - b.x) / b.w;
+}
+for (const id of ["cv-spectrum", "cv-waterfall"]) {
+  const cv = $(id);
+  cv.addEventListener("mousedown", (e) => {
+    if (S.status?.mode !== "live" || !S.frame || e.button !== 0) return;
+    const [vLo, vHi] = viewSpan();
+    S.drag = { cv, x0: e.clientX, start: currentTuned(), moved: false,
+               hzPerPx: (vHi - vLo) / plotBox(cv).w * (window.devicePixelRatio || 1) };
+    cv.classList.add("dragging");
+    e.preventDefault();
+  });
+  cv.addEventListener("wheel", (e) => {
+    if (S.status?.mode !== "live" || !S.frame) return;
+    e.preventDefault();
+    const step = parseFloat($("sel-step").value) / (e.shiftKey ? 10 : 1);
+    const base = Math.round(currentTuned() / step) * step;
+    setPending(base + (e.deltaY < 0 ? step : -step));
+    sendPending();
+  }, { passive: false });
+}
+window.addEventListener("mousemove", (e) => {
+  if (!S.drag) return;
+  const dx = e.clientX - S.drag.x0;
+  if (Math.abs(dx) > 3) S.drag.moved = true;
+  if (!S.drag.moved) return;
+  setPending(S.drag.start - dx * S.drag.hzPerPx);
+  sendPending();
+});
+window.addEventListener("mouseup", (e) => {
+  if (!S.drag) return;
+  const d = S.drag;
+  d.cv.classList.remove("dragging");
+  if (!d.moved) setPending(hzAtMouse(d.cv, e));         // a click: tune to that frequency
+  S.drag = null;
+  sendPending(true);
+});
 for (const id of ["db-min", "db-max", "chk-truth"]) $(id).oninput = scheduleDraw;
 $("cv-overview").onclick = (e) => {
   if (!S.overviewBox || !S.status) return;
@@ -290,13 +471,11 @@ $("cv-overview").onclick = (e) => {
 for (const id of ["cv-spectrum", "cv-waterfall"]) {
   const cv = $(id);
   cv.onmousemove = (e) => {
-    if (!S.frame) return;
-    const b = plotBox(cv), x = (e.clientX - cv.getBoundingClientRect().left) * b.r;
-    const [fLo, fHi] = spanOf(S.frame), hz = fLo + (fHi - fLo) * (x - b.x) / b.w;
-    if (hz < fLo || hz > fHi) return;
-    const i = Math.round((hz - S.frame.f0) / S.frame.df);
+    if (!S.frame || S.drag) return;
+    const hz = hzAtMouse(cv, e), i = Math.round((hz - S.frame.f0) / S.frame.df);
     S.cursorHz = hz;
-    $("ro-cursor").textContent = `${fmtHz(hz, 4)}, ${S.frame.power[Math.max(0, Math.min(S.frame.power.length - 1, i))].toFixed(1)} dBFS`;
+    const p = S.frame.power[i];
+    $("ro-cursor").textContent = fmtHz(hz, 4) + (p === undefined ? "" : `, ${p.toFixed(1)} dBFS`);
     scheduleDraw();
   };
   cv.onmouseleave = () => { S.cursorHz = null; scheduleDraw(); };
@@ -309,9 +488,54 @@ function showView(name) {
   $("analysis").classList.toggle("hidden", name !== "analysis");
   if (name === "analysis") { S.auto.init = false; resetWaterfall(); scheduleDraw(); }
 }
+async function openLive(body) {
+  setStatus(await api("/api/session/live", { method: "POST", body }));
+  S.frame = null; S.overview = null; S.pending = null;
+  showView("analysis");
+}
+async function loadOptions() {
+  const o = await api("/api/radio/options");
+  const opts = (vals, fmt, sel) => vals.map((v) => `<option value="${v}"${v === sel ? " selected" : ""}>${fmt(v)}</option>`).join("");
+  for (const el of document.querySelectorAll(".sel-rate")) el.innerHTML = opts(o.sample_rates, fmtRate, 2e6);
+  for (const el of document.querySelectorAll(".sel-lna")) el.innerHTML = opts(o.lna_steps, String, 16);
+  document.querySelector('#live-form [name=vga_db]').innerHTML = opts(o.vga_steps, String, 20);
+}
+async function checkDevice() {
+  const d = await api("/api/devices");
+  const el = $("dev-status");
+  if (d.in_use) el.textContent = `${d.radio} is in use by the current session.`;
+  else if (d.hackrf.length) el.innerHTML = `<span class="ok">HackRF found</span> (serial ${esc(d.hackrf[0].serial || "?")}).`;
+  else el.innerHTML = `<span class="warn">No HackRF found.</span> Plug it in and reload, or use the simulated radio.`;
+  if (!d.hackrf.length && !d.in_use) document.querySelector("#live-form [name=radio]").value = "sim";
+}
+async function adviseAntenna() {
+  const mhz = parseFloat(document.querySelector("#live-form [name=center_mhz]").value);
+  if (isNaN(mhz)) return;
+  const fits = await api(`/api/antennas?freq_hz=${mhz * 1e6}`);
+  $("ant-advice").textContent = fits.length
+    ? `Antennas covering ${mhz} MHz: ${fits.map((a) => a.name).join(", ")}.`
+    : `None of your antennas is rated for ${mhz} MHz.`;
+  const sel = $("live-antenna");
+  if (fits.length && !fits.some((a) => a.id === sel.value)) sel.value = fits[0].id;
+}
+document.querySelector("#live-form [name=center_mhz]").addEventListener("change", adviseAntenna);
+$("live-form").onsubmit = async (e) => {
+  e.preventDefault();
+  const f = new FormData(e.target);
+  $("live-msg").textContent = "Opening the radio…";
+  try {
+    await openLive({
+      radio: f.get("radio"), center_hz: parseFloat(f.get("center_mhz")) * 1e6,
+      sample_rate_hz: parseFloat(f.get("sample_rate_hz")), amp: f.get("amp") === "1",
+      lna_db: parseInt(f.get("lna_db")), vga_db: parseInt(f.get("vga_db")),
+      antenna_id: f.get("antenna_id") || null,
+    });
+    $("live-msg").textContent = "";
+  } catch (err) { $("live-msg").textContent = err.message; }
+};
 async function openRecording(id) {
   setStatus(await api("/api/session", { method: "POST", body: { recording_id: id } }));
-  S.frame = null; S.overview = null;
+  S.frame = null; S.overview = null; S.pending = null;
   showView("analysis");
   loadOverview().catch((e) => console.error(e));
 }
@@ -332,7 +556,13 @@ async function loadHome() {
   $("ant-table").querySelector("tbody").innerHTML = ants.map((a) => `
     <tr><td>${esc(a.name)}</td><td>${fmtHz(a.freq_min_hz, 1)} – ${fmtHz(a.freq_max_hz, 1)}</td>
     <td>${a.gain_dbi == null ? "–" : a.gain_dbi + " dBi"}</td><td>${esc(a.uses)}</td><td class="muted">${esc(a.notes)}</td></tr>`).join("");
-  $("import-antenna").innerHTML = '<option value="">unknown</option>' + ants.map((a) => `<option value="${esc(a.id)}">${esc(a.name)}</option>`).join("");
+  S.antennas = ants;
+  const antOpts = ants.map((a) => `<option value="${esc(a.id)}">${esc(a.name)}</option>`).join("");
+  $("import-antenna").innerHTML = '<option value="">unknown</option>' + antOpts;
+  $("sel-antenna").innerHTML = '<option value="">none selected</option>' + antOpts;
+  $("live-antenna").innerHTML = '<option value="">none selected</option>' + antOpts;
+  adviseAntenna();
+  checkDevice().catch(() => { $("dev-status").textContent = "Could not check for a HackRF."; });
   $("sess-table").querySelector("tbody").innerHTML = st.recent_sessions.map((s) => `
     <tr><td>${esc(s.started_at.slice(0, 19).replace("T", " "))}</td><td>${esc(s.mode)}</td>
     <td>${esc(s.recording_name || "")}</td><td>${s.ended_at ? esc(s.ended_at.slice(11, 19)) : "active"}</td></tr>`).join("");
@@ -366,6 +596,10 @@ $("import-form").onsubmit = async (e) => {
 // ---------- start ----------
 (async () => {
   connectWs();
+  await loadOptions();
   await loadHome();
-  if (S.status?.active) { showView("analysis"); loadOverview().catch(() => {}); }
+  if (S.status?.active) {
+    showView("analysis");
+    if (S.status.mode === "recording") loadOverview().catch(() => {});
+  }
 })();

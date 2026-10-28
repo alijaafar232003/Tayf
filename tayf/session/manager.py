@@ -1,7 +1,7 @@
 """Session manager: exactly one active session (recording, live or scan).
 
-It owns the source (and, from Phase 2, the HackRF), so two parts of the app can
-never fight over the receiver. Everything downstream asks the manager for frames.
+It owns the source and the radio, so two parts of the app can never fight over
+the HackRF. Everything downstream asks the manager for frames.
 """
 from __future__ import annotations
 
@@ -10,36 +10,57 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from ..core.models import SpectrumFrame
+from ..core.models import IQBlock, SpectrumFrame
+from ..dsp.dc import remove_dc
 from ..dsp.spectrum import overview_rows, spectrum_frame
+from ..sources.live import LiveSource
+from ..sources.radio import LNA_STEPS, SAMPLE_RATES, VGA_STEPS, Gains, HackRFRadio, SimRadio, snap_gain
 from ..sources.recording import RecordingSource
 from ..store.db import Store
 
 MAX_SAMPLES_PER_FRAME = 262_144     # caps CPU per frame at high sample rates
+NFFT_CHOICES = (256, 512, 1024, 2048, 4096, 8192, 16384)
+
+# ADC level guide for an 8-bit receiver (total power of the samples, dBFS)
+LEVEL_LOW_DBFS = -35.0      # below this, quantization noise starts to dominate
+CLIP_WARN = 0.001           # more than 0.1 % of samples at full scale
 
 
 @dataclass
 class Playback:
-    playing: bool = False
-    speed: float = 1.0          # 1.0 = real time
+    playing: bool = False       # recording: playing; live: display running
+    speed: float = 1.0          # recordings only; 1.0 = real time
     nfft: int = 2048
-    fps: float = 20.0           # display frames per second
+    fps: float = 20.0
+    dc_remove: bool = True
 
 
 @dataclass
 class ActiveSession:
     id: int
     mode: str
-    source: RecordingSource
+    source: RecordingSource | LiveSource
     recording_id: int | None = None
     playback: Playback = field(default_factory=Playback)
     overview: tuple[np.ndarray, np.ndarray] | None = None
+
+
+def measure_health(block: IQBlock) -> dict:
+    """ADC level and clipping of one block. Clipping is when I or Q hits full scale."""
+    x = block.samples
+    clipped = (np.abs(x.real) >= 127 / 128) | (np.abs(x.imag) >= 127 / 128)
+    level = 10 * np.log10(np.mean(np.abs(x) ** 2) + 1e-20)
+    clip = float(clipped.mean())
+    hint = "clipping" if clip > CLIP_WARN else "low" if level < LEVEL_LOW_DBFS else "ok"
+    return {"level_dbfs": round(float(level), 1), "clip_pct": round(100 * clip, 3), "level_hint": hint}
 
 
 class SessionManager:
     def __init__(self, store: Store):
         self.store = store
         self.active: ActiveSession | None = None
+        self.health: dict = {}
+        self.rev = 0                    # bumps on every change, so paused views refresh
         self._lock = threading.RLock()
         store.end_open_sessions()
 
@@ -53,6 +74,27 @@ class SessionManager:
             source = RecordingSource(row["meta_path"])
             sid = self.store.start_session("recording", source.settings, recording_id)
             self.active = ActiveSession(sid, "recording", source, recording_id)
+            self._changed()
+            return self.active
+
+    def open_live(self, radio: str = "hackrf", center_hz: float = 100e6, sample_rate_hz: float = 2e6,
+                  amp: bool = False, lna_db: int = 16, vga_db: int = 20,
+                  antenna_id: str | None = None, offset_tuning: bool = True) -> ActiveSession:
+        if sample_rate_hz not in SAMPLE_RATES:
+            raise ValueError(f"sample_rate_hz must be one of {SAMPLE_RATES}")
+        with self._lock:
+            self.close()
+            device = SimRadio() if radio == "sim" else HackRFRadio()
+            gains = Gains(bool(amp), snap_gain(lna_db, LNA_STEPS), snap_gain(vga_db, VGA_STEPS))
+            try:
+                source = LiveSource(device, center_hz, sample_rate_hz, gains, antenna_id, offset_tuning)
+            except Exception:
+                device.close()
+                raise
+            source.start()
+            sid = self.store.start_session("live", source.settings)
+            self.active = ActiveSession(sid, "live", source, playback=Playback(playing=True))
+            self._changed()
             return self.active
 
     def close(self) -> None:
@@ -61,75 +103,130 @@ class SessionManager:
                 self.active.source.close()
                 self.store.end_session(self.active.id)
                 self.active = None
+                self.health = {}
+                self._changed()
+
+    def _changed(self) -> None:
+        self.rev += 1
 
     def status(self) -> dict:
         with self._lock:
             a = self.active
             if a is None:
-                return {"active": False}
-            s, src, pb = a.source.settings, a.source, a.playback
-            return {
-                "active": True, "session_id": a.id, "mode": a.mode,
-                "recording_id": a.recording_id, "name": src.recording.name,
+                return {"active": False, "rev": self.rev}
+            src, pb, s = a.source, a.playback, a.source.settings
+            st = {
+                "active": True, "session_id": a.id, "mode": a.mode, "rev": self.rev,
                 "center_freq_hz": s.center_freq_hz, "sample_rate_hz": s.sample_rate_hz,
-                "duration_s": src.duration_s, "position_s": src.position_s,
-                "playing": pb.playing, "speed": pb.speed, "nfft": pb.nfft, "fps": pb.fps,
-                "settings": s.to_dict(), "comparable": src.recording.comparable,
-                "annotations": src.recording.meta.get("annotations", []),
+                "playing": pb.playing, "nfft": pb.nfft, "fps": pb.fps, "dc_remove": pb.dc_remove,
+                "settings": s.to_dict(), "health": self.health,
             }
+            if a.mode == "recording":
+                st.update({
+                    "recording_id": a.recording_id, "name": src.recording.name,
+                    "duration_s": src.duration_s, "position_s": src.position_s, "speed": pb.speed,
+                    "comparable": src.recording.comparable,
+                    "annotations": src.recording.meta.get("annotations", []),
+                })
+            else:
+                st.update({
+                    "name": f"Live: {src.radio.name}", "tuned_hz": src.tuned_hz,
+                    "offset_hz": src.offset_hz, "offset_tuning": src.offset_tuning,
+                    "antenna_id": src.antenna_id, "overflows": src.overflows,
+                    "gains": {"amp": src.gains.amp, "lna_db": src.gains.lna_db,
+                              "vga_db": src.gains.vga_db, "total_db": src.gains.total_db},
+                })
+            return st
 
-    # --- playback -------------------------------------------------------
+    # --- control --------------------------------------------------------
     def control(self, cmd: dict) -> None:
         with self._lock:
             a = self._require()
-            pb = a.playback
-            if "playing" in cmd:
-                if cmd["playing"] and a.source.position >= a.source.recording.n_samples:
-                    a.source.seek(0)                    # play again from the start
-                pb.playing = bool(cmd["playing"])
-            if "speed" in cmd:
-                pb.speed = float(np.clip(cmd["speed"], 0.05, 64))
+            pb, src = a.playback, a.source
             if "nfft" in cmd:
-                n = int(cmd["nfft"])
-                if n not in (256, 512, 1024, 2048, 4096, 8192, 16384):
+                if int(cmd["nfft"]) not in NFFT_CHOICES:
                     raise ValueError("nfft must be a power of two from 256 to 16384")
-                pb.nfft = n
-            if "seek_s" in cmd:
-                a.source.seek(float(cmd["seek_s"]))
+                pb.nfft = int(cmd["nfft"])
+            if "dc_remove" in cmd:
+                pb.dc_remove = bool(cmd["dc_remove"])
+            if "playing" in cmd:
+                if a.mode == "recording" and cmd["playing"] and src.position >= src.recording.n_samples:
+                    src.seek(0)                         # play again from the start
+                pb.playing = bool(cmd["playing"])
+            if a.mode == "recording":
+                if "speed" in cmd:
+                    pb.speed = float(np.clip(cmd["speed"], 0.05, 64))
+                if "seek_s" in cmd:
+                    src.seek(float(cmd["seek_s"]))
+            else:
+                if "sample_rate_hz" in cmd:
+                    if float(cmd["sample_rate_hz"]) not in SAMPLE_RATES:
+                        raise ValueError(f"sample_rate_hz must be one of {SAMPLE_RATES}")
+                    src.set_sample_rate(float(cmd["sample_rate_hz"]))
+                if "center_hz" in cmd:
+                    src.tune(float(cmd["center_hz"]))
+                if "offset_tuning" in cmd:
+                    src.set_offset_tuning(bool(cmd["offset_tuning"]))
+                if {"amp", "lna_db", "vga_db"} & cmd.keys():
+                    g = src.gains
+                    src.set_gains(Gains(bool(cmd.get("amp", g.amp)),
+                                        snap_gain(cmd.get("lna_db", g.lna_db), LNA_STEPS),
+                                        snap_gain(cmd.get("vga_db", g.vga_db), VGA_STEPS)))
+                if "antenna_id" in cmd:
+                    src.antenna_id = cmd["antenna_id"] or None
+            self._changed()
 
+    # --- frames ---------------------------------------------------------
     def _samples_per_frame(self, a: ActiveSession) -> int:
-        """Samples the playhead advances per display frame."""
+        """Samples the display advances per frame (recordings: scaled by speed)."""
         fs = a.source.settings.sample_rate_hz
-        return max(a.playback.nfft, int(fs * a.playback.speed / a.playback.fps))
+        speed = a.playback.speed if a.mode == "recording" else 1.0
+        return max(a.playback.nfft, int(fs * speed / a.playback.fps))
+
+    def _to_frame(self, a: ActiveSession, block: IQBlock) -> SpectrumFrame:
+        block.samples = block.samples[:MAX_SAMPLES_PER_FRAME]
+        self.health = measure_health(block)
+        if a.playback.dc_remove:
+            block.samples = remove_dc(block.samples)
+        return spectrum_frame(block, a.playback.nfft)
 
     def next_frame(self) -> SpectrumFrame | None:
-        """Advance the playhead by one display frame and return its spectrum.
-        Each frame averages the samples it advanced over (up to a CPU cap), so at
-        real-time speed no sample is skipped."""
+        """Advance by one display frame and return its spectrum.
+        Recordings: each frame averages the samples it advanced over (up to a CPU
+        cap), so at real-time speed no sample is skipped. Live: the newest samples."""
         with self._lock:
             a = self._require()
             if not a.playback.playing:
                 return None
-            hop = self._samples_per_frame(a)
-            block = a.source.read_block(hop)
+            n = self._samples_per_frame(a)
+            if a.mode == "live":
+                n = min(n, MAX_SAMPLES_PER_FRAME)   # live never needs more than it processes
+            block = a.source.read_block(n)
             if block is None or len(block) < a.playback.nfft:
-                a.playback.playing = False
+                if a.mode == "recording":
+                    a.playback.playing = False
+                    self._changed()
                 return None
-            used = block.samples[:MAX_SAMPLES_PER_FRAME]
-            block.samples = used
-            return spectrum_frame(block, a.playback.nfft)
+            return self._to_frame(a, block)
 
-    def current_frame(self) -> SpectrumFrame:
-        """Spectrum at the playhead without moving it (for a paused or seeked view)."""
+    def current_frame(self) -> SpectrumFrame | None:
+        """Spectrum at the playhead without moving it (paused or seeked view)."""
         with self._lock:
             a = self._require()
             n = min(self._samples_per_frame(a), MAX_SAMPLES_PER_FRAME)
-            block = a.source.read_at(a.source.position_s, n)
-            return spectrum_frame(block, a.playback.nfft)
+            if a.mode == "recording":
+                block = a.source.read_at(a.source.position_s, n)
+            else:
+                block = a.source.latest(n)
+            if block is None or len(block) < a.playback.nfft:
+                return None
+            return self._to_frame(a, block)
 
     def overview(self, rows: int = 300, nfft: int = 1024) -> tuple[np.ndarray, np.ndarray]:
         with self._lock:
             a = self._require()
+            if a.mode != "recording":
+                raise RuntimeError("The overview is only available for recordings")
             if a.overview is None or a.overview[1].shape != (rows, nfft):
                 src = a.source
                 a.overview = overview_rows(src.read_at, src.duration_s,

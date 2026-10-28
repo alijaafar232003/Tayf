@@ -22,6 +22,7 @@ from pydantic import BaseModel
 from ..core.models import ReceiverSettings, SpectrumFrame
 from ..core.sigmf_io import DATATYPES, SigMFRecording, import_raw
 from ..session.manager import SessionManager
+from ..sources.radio import FREQ_RANGE, LNA_STEPS, SAMPLE_RATES, VGA_STEPS, find_hackrf
 from ..store.db import Store
 from .. import synth
 
@@ -55,11 +56,32 @@ class OpenIn(BaseModel):
     recording_id: int
 
 
+class LiveIn(BaseModel):
+    radio: str = "hackrf"               # "hackrf" or "sim"
+    center_hz: float = 98.5e6
+    sample_rate_hz: float = 2e6
+    amp: bool = False
+    lna_db: int = 16
+    vga_db: int = 20
+    antenna_id: str | None = None
+    offset_tuning: bool = True
+
+
 class ControlIn(BaseModel):
     playing: bool | None = None
-    speed: float | None = None
     nfft: int | None = None
+    dc_remove: bool | None = None
+    # recordings
+    speed: float | None = None
     seek_s: float | None = None
+    # live
+    center_hz: float | None = None
+    sample_rate_hz: float | None = None
+    amp: bool | None = None
+    lna_db: int | None = None
+    vga_db: int | None = None
+    offset_tuning: bool | None = None
+    antenna_id: str | None = None
 
 
 def frame_bytes(f: SpectrumFrame) -> bytes:
@@ -157,6 +179,33 @@ def create_app(data_dir: str | Path = "data") -> FastAPI:
             raise HTTPException(404, str(e))
         return manager.status()
 
+    @app.get("/api/devices")
+    def devices():
+        """Is a HackRF plugged in? (Not probed while a live session holds it.)"""
+        st = manager.status()
+        if st.get("mode") == "live":
+            return {"hackrf": [], "in_use": True, "radio": st["name"]}
+        try:
+            found = find_hackrf()
+        except Exception as e:                  # SoapySDR missing or broken
+            return {"hackrf": [], "in_use": False, "error": str(e)}
+        return {"hackrf": found, "in_use": False}
+
+    @app.get("/api/radio/options")
+    def radio_options():
+        return {"sample_rates": SAMPLE_RATES, "lna_steps": LNA_STEPS, "vga_steps": VGA_STEPS,
+                "freq_range": FREQ_RANGE}
+
+    @app.post("/api/session/live")
+    def open_live(body: LiveIn):
+        try:
+            manager.open_live(**body.model_dump())
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        except RuntimeError as e:               # no device, device busy
+            raise HTTPException(503, f"Could not open the radio: {e}")
+        return manager.status()
+
     @app.delete("/api/session")
     def close_session():
         manager.close()
@@ -191,33 +240,31 @@ def create_app(data_dir: str | Path = "data") -> FastAPI:
     @app.websocket("/ws/spectrum")
     async def spectrum_ws(ws: WebSocket):
         await ws.accept()
-        last_status = None
-        sent_paused_at = None
         loop = asyncio.get_running_loop()
+        sent_rev, paused_rev, last_status_t = None, None, 0.0
         try:
             while True:
                 t0 = loop.time()
                 st = manager.status()
-                if not st.get("active"):
-                    await asyncio.sleep(0.2)
-                    continue
-                if st["playing"]:
-                    frame = await asyncio.to_thread(manager.next_frame)
-                    sent_paused_at = None
-                    if frame is not None:
-                        await ws.send_bytes(frame_bytes(frame))
-                else:
-                    # Paused: send the spectrum at the playhead once, and again after a seek.
-                    key = (st["session_id"], st["position_s"], st["nfft"], st["speed"])
-                    if key != sent_paused_at:
+                try:
+                    if st.get("active") and st["playing"]:
+                        paused_rev = None
+                        frame = await asyncio.to_thread(manager.next_frame)
+                        if frame is not None:
+                            await ws.send_bytes(frame_bytes(frame))
+                    elif st.get("active") and st["rev"] != paused_rev:
+                        # Paused: send the spectrum at the playhead once per change.
                         frame = await asyncio.to_thread(manager.current_frame)
-                        await ws.send_bytes(frame_bytes(frame))
-                        sent_paused_at = key
+                        if frame is not None:
+                            await ws.send_bytes(frame_bytes(frame))
+                            paused_rev = st["rev"]
+                except RuntimeError:                # session closed meanwhile
+                    pass
+                # Status on every change, and twice a second for the health readouts.
                 st = manager.status()
-                brief = {k: st.get(k) for k in ("session_id", "playing", "speed", "nfft")}
-                if brief != last_status:
+                if st["rev"] != sent_rev or t0 - last_status_t > 0.5:
                     await ws.send_json({"type": "status", **st})
-                    last_status = brief
+                    sent_rev, last_status_t = st["rev"], t0
                 # Keep the frame rate steady: subtract the time spent computing.
                 await asyncio.sleep(max(0.0, 1 / st.get("fps", 20) - (loop.time() - t0)))
         except WebSocketDisconnect:

@@ -46,7 +46,20 @@
 
     <section class="card">
       <h2>Live with HackRF</h2>
-      <p class="muted">Arrives in Phase 2.</p>
+      <p id="dev-status" class="muted">Checking for a HackRF…</p>
+      <form id="live-form" class="grid-form">
+        <label>Radio
+          <select name="radio"><option value="hackrf">HackRF One</option><option value="sim">Simulated HackRF (no hardware)</option></select>
+        </label>
+        <label>Frequency (MHz) <input name="center_mhz" type="number" step="any" value="98.5" required></label>
+        <label>Sample rate <select name="sample_rate_hz" class="sel-rate"></select></label>
+        <label>Antenna <select name="antenna_id" id="live-antenna"></select></label>
+        <label>Amp (+14 dB) <select name="amp"><option value="0">off</option><option value="1">on</option></select></label>
+        <label>LNA gain (dB) <select name="lna_db" class="sel-lna"></select></label>
+        <label>VGA gain (dB) <select name="vga_db" class="sel-vga"></select></label>
+        <div class="wide"><span id="ant-advice" class="muted small"></span></div>
+        <div class="wide"><button type="submit">Start live</button> <span id="live-msg" class="muted"></span></div>
+      </form>
     </section>
 
     <section class="card">
@@ -74,7 +87,7 @@
       <span id="an-info" class="muted"></span>
       <span class="spacer"></span>
       <button id="btn-play">Play</button>
-      <label>Speed
+      <label class="rec-only">Speed
         <select id="sel-speed">
           <option value="0.25">0.25×</option><option value="0.5">0.5×</option>
           <option value="1" selected>1×</option><option value="2">2×</option>
@@ -91,15 +104,40 @@
         <input id="db-min" type="number" step="5" placeholder="auto"> to
         <input id="db-max" type="number" step="5" placeholder="auto">
       </label>
-      <label><input type="checkbox" id="chk-truth" checked> Annotations</label>
+      <label><input type="checkbox" id="chk-dc" checked> Remove DC</label>
+      <label class="rec-only"><input type="checkbox" id="chk-truth" checked> Annotations</label>
+    </div>
+
+    <!-- Live tuning and gain (live sessions only) -->
+    <div class="toolbar live-only">
+      <label>Frequency (MHz) <input id="in-freq" type="number" step="0.1" class="wide-num"></label>
+      <label>Step
+        <select id="sel-step">
+          <option value="10000">10 kHz</option><option value="100000" selected>100 kHz</option>
+          <option value="1000000">1 MHz</option><option value="10000000">10 MHz</option>
+        </select>
+      </label>
+      <label>Sample rate <select id="sel-rate" class="sel-rate"></select></label>
+      <label><input type="checkbox" id="chk-amp"> Amp +14 dB</label>
+      <label>LNA <select id="sel-lna" class="sel-lna"></select> dB</label>
+      <label>VGA <input id="rng-vga" type="range" min="0" max="62" step="2"> <b id="vga-val"></b> dB</label>
+      <label><input type="checkbox" id="chk-offset" checked> Offset tuning</label>
+      <label>Antenna <select id="sel-antenna"></select></label>
+      <span id="ant-warn" class="warn small"></span>
     </div>
 
     <div class="readout">
-      <span>Time <b id="ro-time">0.000 s</b></span>
+      <span class="rec-only">Time <b id="ro-time">0.000 s</b></span>
+      <span class="live-only">Tuned <b id="ro-tuned">–</b></span>
+      <span class="live-only">LO <b id="ro-lo">–</b></span>
       <span>RBW <b id="ro-rbw">–</b></span>
       <span>Cursor <b id="ro-cursor">–</b></span>
       <span>Noise floor (median) <b id="ro-floor">–</b></span>
+      <span>ADC level <b id="ro-level">–</b></span>
+      <span>Clipping <b id="ro-clip">–</b></span>
+      <span class="live-only">Overflows <b id="ro-ovf">0</b></span>
     </div>
+    <p class="muted small live-only">Click a signal to tune to it. Drag sideways to move along the band. Mouse wheel: one step per notch (hold Shift for 10× finer). The dashed line is your tuned frequency.</p>
 
     <div class="plot">
       <canvas id="cv-spectrum"></canvas>
@@ -107,7 +145,7 @@
     <div class="plot">
       <canvas id="cv-waterfall"></canvas>
     </div>
-    <div class="plot timeline">
+    <div class="plot timeline rec-only">
       <div class="muted small">Whole recording (time →, frequency ↑). Click to jump.</div>
       <canvas id="cv-overview"></canvas>
     </div>

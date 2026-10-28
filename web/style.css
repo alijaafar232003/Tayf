@@ -9,6 +9,8 @@
   --grid: #262c35;
   --truth: rgba(255, 196, 77, 0.18);
   --truth-line: #ffc44d;
+  --warn: #ff8a5c;
+  --tuned: #ff6b9a;
 }
 * { box-sizing: border-box; }
 body {
@@ -60,3 +62,10 @@ summary { cursor: pointer; color: var(--accent); }
 #cv-waterfall { height: 300px; }
 #cv-overview { height: 110px; cursor: pointer; }
 .timeline .small { padding: 2px 6px; }
+#analysis.mode-live .rec-only, #analysis.mode-recording .live-only { display: none; }
+input.wide-num { width: 110px; }
+.warn { color: var(--warn); }
+.ok { color: var(--trace); }
+.readout b.warn { color: var(--warn); }
+canvas.tunable { cursor: grab; }
+canvas.tunable.dragging { cursor: grabbing; }
