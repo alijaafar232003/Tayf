@@ -63,11 +63,33 @@
     </section>
 
     <section class="card">
+      <h2>Scan a band</h2>
+      <p class="muted small">The HackRF hops across the range in 20 MHz steps (hackrf_sweep, about 8 GHz per second) and shows power only. Use it to find signals, then click one to open it in live mode.</p>
+      <form id="scan-form" class="grid-form">
+        <label>Radio
+          <select name="radio"><option value="hackrf">HackRF One</option><option value="sim">Simulated HackRF (no hardware)</option></select>
+        </label>
+        <label>Band preset <select name="preset" class="sel-preset"></select></label>
+        <label>From (MHz) <input name="f_lo_mhz" type="number" step="any" required></label>
+        <label>To (MHz) <input name="f_hi_mhz" type="number" step="any" required></label>
+        <label>Bin width <select name="bin_hz" class="sel-bin"></select></label>
+        <label>Antenna <select name="antenna_id" id="scan-antenna"></select></label>
+        <label>Amp (+14 dB) <select name="amp"><option value="0">off</option><option value="1">on</option></select></label>
+        <label>LNA gain (dB) <select name="lna_db" class="sel-lna"></select></label>
+        <label>VGA gain (dB) <select name="vga_db" class="sel-vga"></select></label>
+        <div class="wide preset-note small" id="scan-preset-note"></div>
+        <div class="wide"><button type="submit">Start scan</button> <span id="scan-msg" class="muted"></span></div>
+      </form>
+    </section>
+
+    <section class="card">
       <h2>Antennas</h2>
+      <p class="muted small">Hover a row to see the antenna and what it covers. Drawings are illustrations, not to scale.</p>
       <table class="list" id="ant-table">
-        <thead><tr><th>Name</th><th>Range</th><th>Claimed gain</th><th>Uses</th><th>Notes</th></tr></thead>
+        <thead><tr><th></th><th>Name</th><th>Range</th><th>Claimed gain</th><th>Uses</th><th>Notes</th></tr></thead>
         <tbody></tbody>
       </table>
+      <div id="ant-card" class="ant-card hidden"></div>
     </section>
 
     <section class="card">
@@ -86,6 +108,7 @@
       <strong id="an-title"></strong>
       <span id="an-info" class="muted"></span>
       <span class="spacer"></span>
+      <button id="btn-live-back" class="live-only hidden" title="Return to the scan you came from">&larr; Back to scan</button>
       <button id="btn-play">Play</button>
       <label class="rec-only">Speed
         <select id="sel-speed">
@@ -94,7 +117,7 @@
           <option value="4">4×</option><option value="8">8×</option>
         </select>
       </label>
-      <label>FFT size
+      <label class="no-scan">FFT size
         <select id="sel-nfft">
           <option>512</option><option>1024</option><option selected>2048</option>
           <option>4096</option><option>8192</option><option>16384</option>
@@ -104,8 +127,32 @@
         <input id="db-min" type="number" step="5" placeholder="auto"> to
         <input id="db-max" type="number" step="5" placeholder="auto">
       </label>
-      <label><input type="checkbox" id="chk-dc" checked> Remove DC</label>
+      <label class="no-scan"><input type="checkbox" id="chk-dc" checked> Remove DC</label>
+      <label title="Keep the highest value seen in each bin: catches short bursts"><input type="checkbox" id="chk-hold"> Peak hold</label>
+      <label title="Show the band presets (Lebanon, ITU Region 1)"><input type="checkbox" id="chk-bands" checked> Bands</label>
       <label class="rec-only"><input type="checkbox" id="chk-truth" checked> Annotations</label>
+    </div>
+
+    <!-- Scan range and gain (scan sessions only) -->
+    <div class="toolbar scan-only">
+      <label>Preset <select id="scan-preset" class="sel-preset"></select></label>
+      <label>From <input id="scan-lo" type="number" step="any" class="wide-num"> to
+        <input id="scan-hi" type="number" step="any" class="wide-num"> MHz</label>
+      <label>Bin <select id="scan-bin" class="sel-bin"></select></label>
+      <label><input type="checkbox" id="scan-amp"> Amp +14 dB</label>
+      <label>LNA <select id="scan-lna" class="sel-lna"></select> dB</label>
+      <label>VGA <select id="scan-vga" class="sel-vga"></select> dB</label>
+      <label>Antenna <select id="scan-ant"></select></label>
+      <span id="scan-warn" class="warn small"></span>
+    </div>
+    <div class="toolbar scan-only">
+      <span id="scan-sel" class="muted small">Click a signal to select it, or drag across a range to zoom in.</span>
+      <span id="scan-actions" class="hidden">
+        <label>Live span <select id="scan-live-rate" class="sel-rate"></select></label>
+        <button id="btn-go-live">Open live here</button>
+      </span>
+      <button id="btn-zoom" class="hidden">Scan this range</button>
+      <span id="scan-preset-info" class="muted small preset-note"></span>
     </div>
 
     <!-- Live tuning and gain (live sessions only) -->
@@ -134,13 +181,16 @@
       <span class="rec-only">Time <b id="ro-time">0.000 s</b></span>
       <span class="live-only">Tuned <b id="ro-tuned">–</b></span>
       <span class="live-only">LO <b id="ro-lo">–</b></span>
-      <span>RBW <b id="ro-rbw">–</b></span>
+      <span class="scan-only">Range <b id="ro-range">–</b></span>
+      <span class="scan-only">Sweeps <b id="ro-sweeps">–</b></span>
+      <span><span class="no-scan">RBW</span><span class="scan-only">Bin</span> <b id="ro-rbw">–</b></span>
       <span>Cursor <b id="ro-cursor">–</b></span>
       <span>Noise floor (median) <b id="ro-floor">–</b></span>
-      <span>ADC level <b id="ro-level">–</b></span>
-      <span>Clipping <b id="ro-clip">–</b></span>
+      <span class="no-scan">ADC level <b id="ro-level">–</b></span>
+      <span class="no-scan">Clipping <b id="ro-clip">–</b></span>
       <span class="live-only">Overflows <b id="ro-ovf">0</b></span>
     </div>
+    <p class="muted small scan-only">hackrf_sweep power is per bin, in dB relative to full scale (uncalibrated, like dBFS). Each line is the average of all sweeps since the previous one. There is no ADC level or clipping readout in scan mode: if strong signals look flat-topped, lower the gain.</p>
     <p class="muted small live-only">Click a signal to tune to it. Drag sideways to move along the band. Mouse wheel: one step per notch (hold Shift for 10× finer). The dashed line is your tuned frequency.</p>
 
     <div class="plot">

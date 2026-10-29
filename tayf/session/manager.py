@@ -11,13 +11,14 @@ from pathlib import Path
 
 import numpy as np
 
-from ..core.models import IQBlock, SpectrumFrame, utc_now
+from ..core.models import IQBlock, SpectrumFrame, SweepFrame, utc_now
 from ..core.sigmf_io import SigMFRecording
 from ..dsp.dc import remove_dc
 from ..dsp.spectrum import overview_rows, spectrum_frame
 from ..sources.live import LiveSource
 from ..sources.radio import LNA_STEPS, SAMPLE_RATES, VGA_STEPS, Gains, HackRFRadio, SimRadio, snap_gain
 from ..sources.recording import RecordingSource
+from ..sources.sweep import HackRFSweep, SimSweep, SweepSource, check_range
 from ..store.db import Store
 
 MAX_SAMPLES_PER_FRAME = 262_144     # caps CPU per frame at high sample rates
@@ -41,10 +42,11 @@ class Playback:
 class ActiveSession:
     id: int
     mode: str
-    source: RecordingSource | LiveSource
+    source: RecordingSource | LiveSource | SweepSource
     recording_id: int | None = None
     playback: Playback = field(default_factory=Playback)
     overview: tuple[np.ndarray, np.ndarray] | None = None
+    preset_id: str | None = None        # scan: the band preset it started from
 
 
 def measure_health(block: IQBlock) -> dict:
@@ -100,6 +102,28 @@ class SessionManager:
             self.active = ActiveSession(sid, "live", source, playback=Playback(playing=True))
             self._changed()
             return self.active
+
+    def open_scan(self, radio: str = "hackrf", f_lo_hz: float = 87e6, f_hi_hz: float = 109e6,
+                  bin_hz: float = 25e3, amp: bool = False, lna_db: int = 32, vga_db: int = 30,
+                  antenna_id: str | None = None, preset_id: str | None = None) -> ActiveSession:
+        with self._lock:
+            check_range(f_lo_hz, f_hi_hz, bin_hz)
+            self.close()
+            source = self._make_sweep(radio, f_lo_hz, f_hi_hz, bin_hz,
+                                      Gains(bool(amp), snap_gain(lna_db, LNA_STEPS), snap_gain(vga_db, VGA_STEPS)),
+                                      antenna_id)
+            sid = self.store.start_session("scan", source.settings)
+            self.active = ActiveSession(sid, "scan", source, playback=Playback(playing=True),
+                                        preset_id=preset_id)
+            self._changed()
+            return self.active
+
+    @staticmethod
+    def _make_sweep(radio, f_lo, f_hi, bin_hz, gains, antenna_id) -> SweepSource:
+        cls = SimSweep if radio == "sim" else HackRFSweep
+        source = cls(f_lo, f_hi, bin_hz, gains, antenna_id)
+        source.start()                      # raises if the HackRF is missing or busy
+        return source
 
     def close(self) -> None:
         with self._lock:
@@ -164,6 +188,15 @@ class SessionManager:
                     "comparable": src.recording.comparable,
                     "annotations": src.recording.meta.get("annotations", []),
                 })
+            elif a.mode == "scan":
+                st.update({
+                    "name": f"Scan: {src.radio_name}", "radio": "sim" if isinstance(src, SimSweep) else "hackrf",
+                    "f_lo_hz": src.f_lo, "f_hi_hz": src.f_hi, "bin_hz": src.bin_hz,
+                    "preset_id": a.preset_id, "antenna_id": src.antenna_id,
+                    "sweeps": src.sweeps, "sweep_rate": round(src.sweep_rate, 2), "error": src.error,
+                    "gains": {"amp": src.gains.amp, "lna_db": src.gains.lna_db,
+                              "vga_db": src.gains.vga_db, "total_db": src.gains.total_db},
+                })
             else:
                 st.update({
                     "name": f"Live: {src.radio.name}", "tuned_hz": src.tuned_hz,
@@ -190,7 +223,9 @@ class SessionManager:
                 if a.mode == "recording" and cmd["playing"] and src.position >= src.recording.n_samples:
                     src.seek(0)                         # play again from the start
                 pb.playing = bool(cmd["playing"])
-            if a.mode == "recording":
+            if a.mode == "scan":
+                self._control_scan(a, cmd)
+            elif a.mode == "recording":
                 if "speed" in cmd:
                     pb.speed = float(np.clip(cmd["speed"], 0.05, 64))
                 if "seek_s" in cmd:
@@ -215,7 +250,40 @@ class SessionManager:
                     src.antenna_id = cmd["antenna_id"] or None
             self._changed()
 
+    def _control_scan(self, a: ActiveSession, cmd: dict) -> None:
+        """A new range, bin width or gain means restarting hackrf_sweep."""
+        src = a.source
+        if "antenna_id" in cmd:
+            src.antenna_id = cmd["antenna_id"] or None
+        keys = {"f_lo_hz", "f_hi_hz", "bin_hz", "amp", "lna_db", "vga_db"}
+        if not keys & cmd.keys():
+            return
+        g = src.gains
+        gains = Gains(bool(cmd.get("amp", g.amp)), snap_gain(cmd.get("lna_db", g.lna_db), LNA_STEPS),
+                      snap_gain(cmd.get("vga_db", g.vga_db), VGA_STEPS))
+        f_lo, f_hi = float(cmd.get("f_lo_hz", src.f_lo)), float(cmd.get("f_hi_hz", src.f_hi))
+        bin_hz = float(cmd.get("bin_hz", src.bin_hz))
+        check_range(f_lo, f_hi, bin_hz)
+        radio = "sim" if isinstance(src, SimSweep) else "hackrf"
+        src.close()
+        try:
+            a.source = self._make_sweep(radio, f_lo, f_hi, bin_hz, gains, src.antenna_id)
+        except RuntimeError:                # go back to the scan that worked
+            a.source = self._make_sweep(radio, src.f_lo, src.f_hi, src.bin_hz, src.gains, src.antenna_id)
+            raise
+        if "preset_id" in cmd:
+            a.preset_id = cmd["preset_id"]
+        elif {"f_lo_hz", "f_hi_hz"} & cmd.keys():
+            a.preset_id = None              # a hand-picked range is no longer the preset
+
     # --- frames ---------------------------------------------------------
+    @staticmethod
+    def _sweep_frame(a: ActiveSession, s: SweepFrame | None) -> SpectrumFrame | None:
+        if s is None:
+            return None
+        return SpectrumFrame(s.freqs_hz, s.power_db, s.bin_width_hz, (a.source.f_lo + a.source.f_hi) / 2,
+                             s.time, offset_s=a.source.elapsed_s)
+
     def _samples_per_frame(self, a: ActiveSession) -> int:
         """Samples the display advances per frame (recordings: scaled by speed)."""
         fs = a.source.settings.sample_rate_hz
@@ -237,6 +305,8 @@ class SessionManager:
             a = self._require()
             if not a.playback.playing:
                 return None
+            if a.mode == "scan":
+                return self._sweep_frame(a, a.source.take())
             n = self._samples_per_frame(a)
             if a.mode == "live":
                 n = min(n, MAX_SAMPLES_PER_FRAME)   # live never needs more than it processes
@@ -252,6 +322,8 @@ class SessionManager:
         """Spectrum at the playhead without moving it (paused or seeked view)."""
         with self._lock:
             a = self._require()
+            if a.mode == "scan":
+                return self._sweep_frame(a, a.source.latest())
             n = min(self._samples_per_frame(a), MAX_SAMPLES_PER_FRAME)
             if a.mode == "recording":
                 block = a.source.read_at(a.source.position_s, n)

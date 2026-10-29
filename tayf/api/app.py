@@ -23,8 +23,9 @@ from ..core.models import ReceiverSettings, SpectrumFrame
 from ..core.sigmf_io import DATATYPES, SigMFRecording, import_raw
 from ..session.manager import SessionManager
 from ..sources.radio import FREQ_RANGE, LNA_STEPS, SAMPLE_RATES, VGA_STEPS, find_hackrf
+from ..sources.sweep import BIN_WIDTHS
 from ..store.db import Store
-from .. import synth
+from .. import presets, synth
 
 WEB_DIR = Path(__file__).resolve().parents[2] / "web"
 
@@ -67,6 +68,18 @@ class LiveIn(BaseModel):
     offset_tuning: bool = True
 
 
+class ScanIn(BaseModel):
+    radio: str = "hackrf"               # "hackrf" or "sim"
+    f_lo_hz: float = 87e6
+    f_hi_hz: float = 109e6
+    bin_hz: float = 25e3
+    amp: bool = False
+    lna_db: int = 32
+    vga_db: int = 30
+    antenna_id: str | None = None
+    preset_id: str | None = None
+
+
 class RecordIn(BaseModel):
     on: bool
 
@@ -86,6 +99,11 @@ class ControlIn(BaseModel):
     vga_db: int | None = None
     offset_tuning: bool | None = None
     antenna_id: str | None = None
+    # scan
+    f_lo_hz: float | None = None
+    f_hi_hz: float | None = None
+    bin_hz: float | None = None
+    preset_id: str | None = None
 
 
 def frame_bytes(f: SpectrumFrame) -> bytes:
@@ -187,7 +205,7 @@ def create_app(data_dir: str | Path = "data") -> FastAPI:
     def devices():
         """Is a HackRF plugged in? (Not probed while a live session holds it.)"""
         st = manager.status()
-        if st.get("mode") == "live":
+        if st.get("mode") in ("live", "scan"):
             return {"hackrf": [], "in_use": True, "radio": st["name"]}
         try:
             found = find_hackrf()
@@ -198,7 +216,11 @@ def create_app(data_dir: str | Path = "data") -> FastAPI:
     @app.get("/api/radio/options")
     def radio_options():
         return {"sample_rates": SAMPLE_RATES, "lna_steps": LNA_STEPS, "vga_steps": VGA_STEPS,
-                "freq_range": FREQ_RANGE}
+                "freq_range": FREQ_RANGE, "bin_widths": BIN_WIDTHS}
+
+    @app.get("/api/presets")
+    def band_presets():
+        return [b.to_dict() for b in presets.BANDS]
 
     @app.post("/api/session/live")
     def open_live(body: LiveIn):
@@ -208,6 +230,16 @@ def create_app(data_dir: str | Path = "data") -> FastAPI:
             raise HTTPException(400, str(e))
         except RuntimeError as e:               # no device, device busy
             raise HTTPException(503, f"Could not open the radio: {e}")
+        return manager.status()
+
+    @app.post("/api/session/scan")
+    def open_scan(body: ScanIn):
+        try:
+            manager.open_scan(**body.model_dump())
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        except RuntimeError as e:               # no device, device busy, hackrf_sweep missing
+            raise HTTPException(503, f"Could not start the scan: {e}")
         return manager.status()
 
     @app.post("/api/session/record")

@@ -73,3 +73,33 @@ button.rec.on { background: var(--rec); color: #fff; border-color: var(--rec); }
 #rec-info.on { color: var(--rec); font-variant-numeric: tabular-nums; }
 canvas.tunable { cursor: grab; }
 canvas.tunable.dragging { cursor: grabbing; }
+:root { --hold: rgba(255, 196, 77, 0.75); --band: rgba(79, 179, 255, 0.10); --band-line: rgba(79, 179, 255, 0.7); --sel: rgba(255, 107, 154, 0.18); }
+#analysis.mode-scan .rec-only, #analysis.mode-scan .live-only, #analysis.mode-scan .no-scan,
+#analysis.mode-live .scan-only, #analysis.mode-recording .scan-only { display: none; }
+#analysis.mode-scan canvas { cursor: crosshair; }
+.preset-note .tag { display: inline-block; padding: 0 7px; border-radius: 999px; border: 1px solid var(--border); margin-right: 6px; font-size: 11px; }
+.preset-note .tag.seen { color: var(--trace); border-color: var(--trace); }
+.preset-note .tag.expected { color: var(--truth-line); border-color: var(--truth-line); }
+#scan-actions { display: inline-flex; align-items: center; gap: 8px; }
+#scan-actions.hidden { display: none; }
+
+/* Antenna drawings */
+#ant-table td.ant-thumb { width: 44px; padding: 2px 4px; }
+#ant-table td.ant-thumb svg { display: block; width: 36px; height: 48px; }
+#ant-table tbody tr { cursor: default; }
+#ant-table tbody tr:hover { background: #1d232b; }
+.ant-card {
+  position: fixed; z-index: 10; width: 400px; pointer-events: none;
+  background: var(--panel); border: 1px solid var(--accent); border-radius: 8px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5); padding: 12px 14px;
+  display: grid; grid-template-columns: 120px 1fr; gap: 4px 14px;
+}
+.ant-card.hidden { display: none; }
+.ant-card .pic { grid-row: 1 / span 2; }
+.ant-card .pic svg { width: 120px; height: 160px; display: block; }
+.ant-card h3 { margin: 0; font-size: 15px; }
+.ant-card dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; font-size: 12px; align-self: start; }
+.ant-card dt { color: var(--muted); }
+.ant-card dd { margin: 0; }
+.ant-card .cover { grid-column: 1 / -1; margin-top: 6px; }
+.ant-card .cover svg { width: 100%; height: 58px; display: block; }
