@@ -65,7 +65,7 @@ No AM medium-wave coverage, so the AM class is tested on airband. A 50 Ω SMA te
 - **Session manager:** one active mode (recording, live or scan); owns the HackRF.
 - **Receiver services:** gain control (amp/LNA/VGA), Receiver Check, antenna registry, receiver profile, health (clipping, dropped samples).
 - **Spectrum + detector → tracker** (stable IDs, candidate table, boxes on display).
-- **Investigator** (user clicks a signal): gets I/Q from the recording, the live span, or a retune; channelizes; measures edges, bandwidth, SNR and frequency offset; shows detailed views; calls the **classifier** (features + Random Forest → class, confidence, or Unknown).
+- **Signal Inspector** (formerly "investigator"; user clicks a signal): gets I/Q from the recording, the live span, or a retune (works the same for live and recordings); channelizes; measures edges, bandwidth, SNR, frequency offset and burst timing; shows detailed views; calls the **classifier** (features + Random Forest → class, confidence, or Unknown); shows a history panel (past observations of the same signal); later plays audio (Phase 5).
 - **Observation store:** SQLite (sessions, observations, signal profiles) + SigMF I/Q files.
 - **History + analytics:** new / known / changed matching, occupancy, recording comparison.
 - **Offline dataset + training** in notebooks: generator, public datasets, labelled recordings. Split **by recording**, not by snippet.
@@ -76,12 +76,18 @@ No AM medium-wave coverage, so the AM class is tested on airband. A 50 Ω SMA te
 
 1. **Foundations (days 1–3):** data model + SigMF, recording import, spectrum + waterfall, session manager, API + dashboard shell, antenna registry. Notebook: processing gain. **Gate:** a recording is analysed in the dashboard.
 2. **Live + receiver (days 4–8):** HackRF live + sweep, gain controls, health, Receiver Check, Lebanon presets. Notebook: receiver characterization (50 Ω, with/without LNA). **Gate:** live view with gain and Receiver Check.
-3. **Detect + investigate (days 9–14):** FCME detector (concept notebook, no comparison) + tracker, boxes + candidate table, investigator + views, observation store, history + "first seen". **Gate:** click a signal and it is measured and saved.
-4. **Classify + deliver (days 15–21):** signal generator, ESP32 + FM recordings, features + Random Forest, Unknown threshold, real-vs-synthetic evaluation, report + demo. Notebook: features. **Gate:** classifier tested on real signals; demo ready.
+3. **Detect + inspect (days 9–14):** FCME detector (concept notebook, no comparison) + tracker, boxes + candidate table, **Signal Inspector** (agreed 2026-10-30):
+   - measurements: centre frequency, offset, bandwidth (edges), strength (dBFS; dBm only after calibration), SNR;
+   - **burst analysis:** burst length, gap, repeat period, duty cycle (the Phase 5 bit slicer builds on it);
+   - views: zoomed spectrum + waterfall of the signal, envelope vs time, I/Q vs time, **instantaneous frequency** vs time (FM/FSK), **constellation** (shown where it makes sense: after coarse frequency-offset and symbol-timing correction, for linear modulations; otherwise the instantaneous-frequency view instead);
+   - **history panel:** earlier observations of the same signal (times seen, first/last seen, then-vs-now bandwidth, strength, burst period);
+   - observation store, history + "first seen".
+   **Gate:** click a signal (live or recording) and it is measured, shown and saved.
+4. **Classify + deliver (days 15–21):** signal generator, ESP32 + FM recordings, features + Random Forest, Unknown threshold, real-vs-synthetic evaluation, report + demo. Notebook: features. The modulation estimate (class + confidence, or Unknown) appears in the Signal Inspector; signal-family guesses inside the course are simple rules, always labelled as hypotheses (e.g. "GFSK, 2 MHz, hopping at 2.4 GHz → probably BLE"). **Gate:** classifier tested on real signals; demo ready.
 
-5. **Listen + decode (final phase, user request 2026-10-28):** demodulate the investigated signal to audio in the browser (WBFM with 50 µs de-emphasis for Region 1, NBFM, AM for airband; maybe SSB); decoders by class: FM RDS (station name), OOK/FSK bit slicer for "random" signals (pulse widths, bit rate guess, raw bits; car keys receive-only, never replay), possibly ADS-B at 1090 MHz. Only decode what is lawful and not private. Audio demod reuses the Phase 3 channelizer, so plain FM/AM listening may land earlier if time allows.
+5. **Listen + decode (final phase, user request 2026-10-28):** demodulate the inspected signal to audio in the browser, live or from a recording (WBFM with 50 µs de-emphasis for Region 1, NBFM, AM for airband; SSB as a stretch goal); decoders by class: FM RDS (station name), OOK/FSK bit slicer for "random" signals (pulse widths, bit rate guess, raw bits; car keys receive-only, never replay), possibly ADS-B at 1090 MHz. Only decode what is lawful and not private. Audio demod reuses the Phase 3 channelizer, so plain FM/AM listening may land earlier if time allows.
 
-**After the course:** auto-classify inside the live span, occupancy analytics, recording comparison, signal-family hypotheses, automatic investigation, anomaly detection, neural-network classifier, dBm calibration. The database schema plans for these from day 1.
+**After the course:** auto-classify inside the live span, occupancy analytics, recording comparison, ML signal-family classification (needs many labelled examples per device type), automatic investigation, anomaly detection, neural-network classifier, dBm calibration. The database schema plans for these from day 1.
 
 ## 7. Evidence from the old detector code (synthetic, 1 MHz span, FFT 2048)
 
