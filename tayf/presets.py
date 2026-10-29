@@ -38,11 +38,12 @@ BANDS = [
          lna_db=24),                 # LNA 32 overloads here: the floor rose 13 dB for 8 dB of gain
     Band("air", "Airband (AM voice)", 118 * MHZ, 137 * MHZ, 117 * MHZ, 138 * MHZ, 10e3, "whip-5dbi",
          "AM voice, 25 / 8.33 kHz channels; ATIS from Beirut airport",
-         hint="2026-10-29: steady carriers at 120.00 and 122.47 MHz; 120.00 is a multiple of 20 MHz, "
-              "so it may be a receiver spur (check in the characterization)"),
+         hint="2026-10-29: steady carrier at 122.47 MHz (real: gone with no antenna). "
+              "120.000 MHz is the HackRF's own clock harmonic (notebook 02), not a station"),
     Band("2m", "2 m amateur + marine VHF", 144 * MHZ, 174 * MHZ, 143 * MHZ, 175 * MHZ, 10e3, "whip-5dbi",
          "NBFM: amateur 144-146, marine 156-162, land mobile",
-         hint="2026-10-29: one steady carrier at 160.03 MHz (also near a multiple of 20 MHz)"),
+         hint="2026-10-29: steady carrier at 160.03 MHz (real: gone with no antenna); "
+              "160.000 MHz next to it is the HackRF's own clock harmonic"),
     Band("car315", "310-320 MHz (car keys seen here)", 312 * MHZ, 318 * MHZ, 310 * MHZ, 320 * MHZ, 10e3,
          "whip-5dbi", "Short bursts from key fobs (not a Region 1 SRD band, but imported cars use it)",
          seen="2026-10-28: car key bursts near 314.36 / 314.52 MHz"),
@@ -50,7 +51,7 @@ BANDS = [
          "OOK/FSK bursts: remotes, sensors, doorbells"),
     Band("dvbt", "UHF TV (DVB-T)", 470 * MHZ, 694 * MHZ, 470 * MHZ, 694 * MHZ, 100e3, "whip-5dbi",
          "8 MHz-wide flat OFDM blocks, if terrestrial TV is on air",
-         hint="2026-10-29: a narrow carrier at 541.35 MHz, no flat 8 MHz blocks seen"),
+         hint="2026-10-29: a narrow carrier at 541.35 MHz (real: gone with no antenna), no flat 8 MHz blocks seen"),
     Band("lte800", "LTE 800 downlink", 791 * MHZ, 821 * MHZ, 788 * MHZ, 824 * MHZ, 100e3, "mag-12dbi",
          "LTE blocks (band 20), if the operators use it",
          hint="2026-10-29 (whip): the whole range sat ~18 dB above the 868 MHz floor at the same gain: "
@@ -76,7 +77,8 @@ BANDS = [
          seen="2026-10-29 (whip): activity at 5180-5250 MHz (channels 36-48), ~27 dB"),
     Band("all", "Everything (1 MHz - 6 GHz)", 1 * MHZ, 6000 * MHZ, 1 * MHZ, 6000 * MHZ, 1e6, "telescopic",
          "A whole-range overview; about one pass per second", lna_db=24, vga_db=30,
-         hint="2026-10-29: peaks at 1.5, 14.5 and 19.5 MHz, below every antenna's range: likely receiver spurs"),
+         hint="Receiver spurs (notebook 02, nothing connected): carriers at 14, 40, 80, 120, 160, 200 and "
+              "2200 MHz are made by the HackRF; many more peaks appear only in scans (hackrf_sweep artifacts)"),
 ]
 
 BY_ID = {b.id: b for b in BANDS}

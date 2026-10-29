@@ -6,8 +6,6 @@ native format). Buffering, offset tuning and DC removal live in LiveSource.
 """
 from __future__ import annotations
 
-import os
-import sys
 import time
 from dataclasses import dataclass
 from typing import Protocol
@@ -54,22 +52,10 @@ class Radio(Protocol):
 
 
 # --- real HackRF ------------------------------------------------------------
-
-def _add_conda_dll_paths() -> None:
-    """SoapySDR loads its HackRF module with LoadLibrary, which needs the env's
-    DLL folder on PATH. That is set when the env is activated, but not when
-    python.exe is started directly (e.g. by an IDE), so add it here."""
-    if os.name != "nt":
-        return
-    lib = os.path.join(sys.prefix, "Library", "bin")
-    if os.path.isdir(lib) and lib not in os.environ.get("PATH", ""):
-        os.environ["PATH"] = lib + os.pathsep + os.environ.get("PATH", "")
-        os.add_dll_directory(lib)
-
+# (SoapySDR's HackRF module needs the env's DLL folder: tayf/__init__.py adds it.)
 
 def find_hackrf() -> list[dict]:
     """HackRFs that SoapySDR can see (empty if none is plugged in)."""
-    _add_conda_dll_paths()
     import SoapySDR
     return [dict(d) for d in SoapySDR.Device.enumerate() if dict(d).get("driver") == "hackrf"]
 
@@ -78,7 +64,6 @@ class HackRFRadio:
     name = "HackRF One"
 
     def __init__(self):
-        _add_conda_dll_paths()
         import SoapySDR
         from SoapySDR import SOAPY_SDR_CS8, SOAPY_SDR_RX
         self._soapy, self._rx = SoapySDR, SOAPY_SDR_RX
