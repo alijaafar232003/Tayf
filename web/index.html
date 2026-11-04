@@ -48,15 +48,15 @@
       <h2>Live with HackRF</h2>
       <p id="dev-status" class="muted">Checking for a HackRF…</p>
       <form id="live-form" class="grid-form">
-        <label>Radio
+        <label data-tip="The real HackRF, or a simulated one (made-up signals) for trying things without hardware.">Radio
           <select name="radio"><option value="hackrf">HackRF One</option><option value="sim">Simulated HackRF (no hardware)</option></select>
         </label>
         <label>Frequency (MHz) <input name="center_mhz" type="number" step="any" value="98.5" required></label>
-        <label>Sample rate <select name="sample_rate_hz" class="sel-rate"></select></label>
-        <label>Antenna <select name="antenna_id" id="live-antenna"></select></label>
-        <label>Amp (+14 dB) <select name="amp"><option value="0">off</option><option value="1">on</option></select></label>
-        <label>LNA gain (dB) <select name="lna_db" class="sel-lna"></select></label>
-        <label>VGA gain (dB) <select name="vga_db" class="sel-vga"></select></label>
+        <label data-tip="Sample rate = how much spectrum you see at once. 10 and 12.5 MS/s have the flattest floor on this HackRF; at 2 and 4 MS/s signals just outside the span fold in near the edges.">Sample rate <select name="sample_rate_hz" class="sel-rate"></select></label>
+        <label data-tip="The antenna on the HackRF. Saved with the session and recordings, and used for range warnings.">Antenna <select name="antenna_id" id="live-antenna"></select></label>
+        <label data-tip="RF amplifier, +14 dB in front of everything. Helps very weak signals, but overloads easily near strong transmitters. Keep it off unless you need it.">Amp (+14 dB) <select name="amp"><option value="0">off</option><option value="1">on</option></select></label>
+        <label data-tip="LNA (IF) gain, 0–40 dB in 8 dB steps. Set it first: it decides sensitivity (on this HackRF its own front-end noise takes over above ~25–34 dB). Lower it if strong signals overload; FM band: 24 dB.">LNA gain (dB) <select name="lna_db" class="sel-lna"></select></label>
+        <label data-tip="VGA (baseband) gain, 0–62 dB in 2 dB steps. Set it after the LNA, just high enough that the noise floor clears the ADC floor (about 16–21 dB at LNA 32). More only brings clipping closer.">VGA gain (dB) <select name="vga_db" class="sel-vga"></select></label>
         <div class="wide"><span id="ant-advice" class="muted small"></span></div>
         <div class="wide"><button type="submit">Start live</button> <span id="live-msg" class="muted"></span></div>
       </form>
@@ -66,17 +66,17 @@
       <h2>Scan a band</h2>
       <p class="muted small">The HackRF hops across the range in 20 MHz steps (hackrf_sweep, about 8 GHz per second) and shows power only. Use it to find signals, then click one to open it in live mode.</p>
       <form id="scan-form" class="grid-form">
-        <label>Radio
+        <label data-tip="The real HackRF, or a simulated one (made-up signals) for trying things without hardware.">Radio
           <select name="radio"><option value="hackrf">HackRF One</option><option value="sim">Simulated HackRF (no hardware)</option></select>
         </label>
-        <label>Band preset <select name="preset" class="sel-preset"></select></label>
+        <label data-tip="Band presets for Lebanon (ITU Region 1): range, bin width, gains and antenna. &quot;to verify&quot; = only expected from the allocation table, not yet confirmed by a real scan.">Band preset <select name="preset" class="sel-preset"></select></label>
         <label>From (MHz) <input name="f_lo_mhz" type="number" step="any" required></label>
         <label>To (MHz) <input name="f_hi_mhz" type="number" step="any" required></label>
-        <label>Bin width <select name="bin_hz" class="sel-bin"></select></label>
-        <label>Antenna <select name="antenna_id" id="scan-antenna"></select></label>
-        <label>Amp (+14 dB) <select name="amp"><option value="0">off</option><option value="1">on</option></select></label>
-        <label>LNA gain (dB) <select name="lna_db" class="sel-lna"></select></label>
-        <label>VGA gain (dB) <select name="vga_db" class="sel-vga"></select></label>
+        <label data-tip="Width of one frequency bin of the scan. Finer bins separate narrow signals and lower the floor per bin, but each sweep takes longer.">Bin width <select name="bin_hz" class="sel-bin"></select></label>
+        <label data-tip="The antenna on the HackRF. Saved with the session and recordings, and used for range warnings.">Antenna <select name="antenna_id" id="scan-antenna"></select></label>
+        <label data-tip="RF amplifier, +14 dB in front of everything. Helps very weak signals, but overloads easily near strong transmitters. Keep it off unless you need it.">Amp (+14 dB) <select name="amp"><option value="0">off</option><option value="1">on</option></select></label>
+        <label data-tip="LNA (IF) gain, 0–40 dB in 8 dB steps. Set it first: it decides sensitivity (on this HackRF its own front-end noise takes over above ~25–34 dB). Lower it if strong signals overload; FM band: 24 dB.">LNA gain (dB) <select name="lna_db" class="sel-lna"></select></label>
+        <label data-tip="VGA (baseband) gain, 0–62 dB in 2 dB steps. Set it after the LNA, just high enough that the noise floor clears the ADC floor (about 16–21 dB at LNA 32). More only brings clipping closer.">VGA gain (dB) <select name="vga_db" class="sel-vga"></select></label>
         <div class="wide preset-note small" id="scan-preset-note"></div>
         <div class="wide"><button type="submit">Start scan</button> <span id="scan-msg" class="muted"></span></div>
       </form>
@@ -108,90 +108,104 @@
       <strong id="an-title"></strong>
       <span id="an-info" class="muted"></span>
       <span class="spacer"></span>
-      <button id="btn-live-back" class="live-only hidden" title="Return to the scan you came from">&larr; Back to scan</button>
-      <button id="btn-play">Play</button>
-      <label class="rec-only">Speed
+      <button id="btn-live-back" class="live-only hidden" data-tip="Return to the scan you came from, with its range and gains.">&larr; Back to scan</button>
+      <button id="btn-play" data-tip="Live and scan: freeze the display (the radio keeps running). Recordings: play or pause.">Play</button>
+      <label class="rec-only" data-tip="Playback speed. Above 1× each frame averages more samples, so the floor looks calmer.">Speed
         <select id="sel-speed">
           <option value="0.25">0.25×</option><option value="0.5">0.5×</option>
           <option value="1" selected>1×</option><option value="2">2×</option>
           <option value="4">4×</option><option value="8">8×</option>
         </select>
       </label>
-      <label class="no-scan">FFT size
+      <label class="no-scan" data-tip="Number of FFT bins across the span. Doubling it halves the resolution bandwidth (RBW): narrow signals rise 3 dB above the floor (processing gain, notebook 01), but each frame needs more samples. When zoomed in, a bigger FFT shows more detail.">FFT size
         <select id="sel-nfft">
           <option>512</option><option>1024</option><option selected>2048</option>
           <option>4096</option><option>8192</option><option>16384</option>
         </select>
       </label>
-      <label>dB range
+      <label data-tip="Vertical scale of the spectrum and the colours of the waterfall. Leave empty for automatic: from the floor − 10 dB up to the strongest signal + 5 dB.">dB range
         <input id="db-min" type="number" step="5" placeholder="auto"> to
         <input id="db-max" type="number" step="5" placeholder="auto">
       </label>
-      <label class="no-scan"><input type="checkbox" id="chk-dc" checked> Remove DC</label>
-      <label title="Keep the highest value seen in each bin: catches short bursts"><input type="checkbox" id="chk-hold"> Peak hold</label>
-      <label title="Show the band presets (Lebanon, ITU Region 1)"><input type="checkbox" id="chk-bands" checked> Bands</label>
-      <label class="rec-only"><input type="checkbox" id="chk-truth" checked> Annotations</label>
+      <label class="no-scan" data-tip="Subtracts each block's average, which removes the HackRF's DC spike at the LO (14–18 dB above the floor here, ~2 dB after removal). Display only: recordings stay raw."><input type="checkbox" id="chk-dc" checked> Remove DC</label>
+      <label data-tip="Hold: keeps the highest value seen in each bin, so short bursts (key fobs, 433 MHz sensors, Wi-Fi) stay visible. Decay: the same, but old peaks sink 10 dB per second, so it shows what happened recently. The marker shows the highest point in view. Kept at the right frequencies when you retune.">Peak hold
+        <select id="sel-hold"><option value="off">off</option><option value="hold">hold</option><option value="decay">decay</option></select>
+      </label>
+      <button id="btn-hold-clear" class="small-btn" data-tip="Start the peak hold again from now.">Clear</button>
+      <label data-tip="Averages each bin over recent frames (in power, not dB). The floor gets calmer, so weak steady signals are easier to see; short bursts get flattened. Light ≈ 2 frames, medium ≈ 5, heavy ≈ 15. The waterfall stays unsmoothed.">Smoothing
+        <select id="sel-smooth"><option value="off">off</option><option value="light">light</option><option value="medium">medium</option><option value="heavy">heavy</option></select>
+      </label>
+      <label data-tip="Shows the band presets (Lebanon, ITU Region 1) along the top of the spectrum."><input type="checkbox" id="chk-bands" checked> Bands</label>
+      <label data-tip="Marks carriers the HackRF makes by itself (measured in notebook 02 with nothing connected: 14, 40, 80, 120, 160, 200, 2200 MHz), so they are not taken for real signals."><input type="checkbox" id="chk-spurs" checked> Receiver spurs</label>
+      <label class="rec-only" data-tip="Labels stored in the recording, e.g. the true signals of the synthetic test scene."><input type="checkbox" id="chk-truth" checked> Annotations</label>
     </div>
 
     <!-- Scan range and gain (scan sessions only) -->
     <div class="toolbar scan-only">
-      <label>Preset <select id="scan-preset" class="sel-preset"></select></label>
-      <label>From <input id="scan-lo" type="number" step="any" class="wide-num"> to
+      <label data-tip="Band presets for Lebanon (ITU Region 1). A preset sets the range, bin width, gains and antenna. &quot;seen here&quot; = confirmed by a real scan; &quot;to verify&quot; = only expected from the allocation table.">Preset <select id="scan-preset" class="sel-preset"></select></label>
+      <label data-tip="Frequency range to sweep. The HackRF hops in 20 MHz steps, about 8 GHz per second.">From <input id="scan-lo" type="number" step="any" class="wide-num"> to
         <input id="scan-hi" type="number" step="any" class="wide-num"> MHz</label>
-      <label>Bin <select id="scan-bin" class="sel-bin"></select></label>
-      <label><input type="checkbox" id="scan-amp"> Amp +14 dB</label>
-      <label>LNA <select id="scan-lna" class="sel-lna"></select> dB</label>
-      <label>VGA <select id="scan-vga" class="sel-vga"></select> dB</label>
-      <label>Antenna <select id="scan-ant"></select></label>
+      <label data-tip="Width of one frequency bin of the scan. Finer bins separate narrow signals and lower the floor per bin, but each sweep takes longer.">Bin <select id="scan-bin" class="sel-bin"></select></label>
+      <label data-tip="RF amplifier, +14 dB in front of everything. Helps very weak signals, but overloads easily near strong transmitters. Keep it off unless you need it."><input type="checkbox" id="scan-amp"> Amp +14 dB</label>
+      <label data-tip="LNA (IF) gain, 0–40 dB in 8 dB steps. Set it first: it decides sensitivity. Lower it if the floor jumps by more than the gain you add (overload; FM band: 24 dB).">LNA <select id="scan-lna" class="sel-lna"></select> dB</label>
+      <label data-tip="VGA (baseband) gain, 0–62 dB in 2 dB steps. Set it after the LNA, just high enough to lift the noise floor clear of the ADC floor.">VGA <select id="scan-vga" class="sel-vga"></select> dB</label>
+      <label data-tip="The antenna on the HackRF. Saved with the session and used for the range warning.">Antenna <select id="scan-ant"></select></label>
       <span id="scan-warn" class="warn small"></span>
     </div>
     <div class="toolbar scan-only">
-      <span id="scan-sel" class="muted small">Click a signal to select it, or drag across a range to zoom in.</span>
+      <span id="scan-sel" class="muted small"></span>
       <span id="scan-actions" class="hidden">
-        <label>Live span <select id="scan-live-rate" class="sel-rate"></select></label>
-        <button id="btn-go-live">Open live here</button>
+        <label data-tip="Sample rate of the live view that opens = how much spectrum it shows at once.">Live span <select id="scan-live-rate" class="sel-rate"></select></label>
+        <button id="btn-go-live" data-tip="Stop the scan and open live mode (with I/Q) tuned to the selected signal.">Open live here</button>
       </span>
-      <button id="btn-zoom" class="hidden">Scan this range</button>
+      <button id="btn-zoom" class="hidden" data-tip="Rescan only the part on screen, with bins fine enough for about 1000–4000 points.">Scan this range</button>
       <span id="scan-preset-info" class="muted small preset-note"></span>
     </div>
 
     <!-- Live tuning and gain (live sessions only) -->
     <div class="toolbar live-only">
-      <button id="btn-rec" class="rec" title="Save everything the HackRF receives, raw, as a SigMF recording">&#9679; Record</button>
+      <button id="btn-rec" class="rec" data-tip="Save everything the HackRF receives, raw (8-bit I/Q), as a SigMF recording. Retunes and gain changes are kept as separate segments.">&#9679; Record</button>
       <span id="rec-info" class="muted small"></span>
+      <span class="spacer"></span>
+      <button id="btn-check" data-tip="Tries 8 gain settings in about 2 seconds, then suggests the best one for this band and explains the noise floor: how much comes from the antenna and how much from the HackRF itself. Your gains are put back afterwards; Apply uses the suggestion.">Receiver Check</button>
     </div>
+    <section id="check-panel" class="check live-only hidden"></section>
     <div class="toolbar live-only">
-      <label>Frequency (MHz) <input id="in-freq" type="number" step="0.1" class="wide-num"></label>
-      <label>Step
+      <label data-tip="The frequency you are tuned to (dashed line). Type a value, or click, drag or scroll on the spectrum.">Frequency (MHz) <input id="in-freq" type="number" step="0.1" class="wide-num"></label>
+      <label data-tip="How far one mouse-wheel notch tunes. Hold Shift for 10× finer.">Step
         <select id="sel-step">
           <option value="10000">10 kHz</option><option value="100000" selected>100 kHz</option>
           <option value="1000000">1 MHz</option><option value="10000000">10 MHz</option>
         </select>
       </label>
-      <label>Sample rate <select id="sel-rate" class="sel-rate"></select></label>
-      <label><input type="checkbox" id="chk-amp"> Amp +14 dB</label>
-      <label>LNA <select id="sel-lna" class="sel-lna"></select> dB</label>
-      <label>VGA <input id="rng-vga" type="range" min="0" max="62" step="2"> <b id="vga-val"></b> dB</label>
-      <label><input type="checkbox" id="chk-offset" checked> Offset tuning</label>
-      <label>Antenna <select id="sel-antenna"></select></label>
+      <label data-tip="Sample rate = how much spectrum you see at once. On this HackRF 10 and 12.5 MS/s have the flattest floor; at 2 and 4 MS/s its filter can't go below 1.75 MHz, so signals just outside the span fold in near the edges.">Sample rate <select id="sel-rate" class="sel-rate"></select></label>
+      <label data-tip="RF amplifier, +14 dB in front of everything. Helps very weak signals, but overloads easily near strong transmitters. Keep it off unless you need it."><input type="checkbox" id="chk-amp"> Amp +14 dB</label>
+      <label data-tip="LNA (IF) gain, 0–40 dB in 8 dB steps. Set it first: it decides sensitivity. On this HackRF its own front-end noise only takes over above ~25–34 dB of LNA (notebook 02). Lower it if strong signals overload (watch Clipping; FM band: 24 dB).">LNA <select id="sel-lna" class="sel-lna"></select> dB</label>
+      <label data-tip="VGA (baseband) gain, 0–62 dB in 2 dB steps. Set it after the LNA, just high enough that the noise floor clears the ADC floor (about 16–21 dB at LNA 32). More only brings clipping closer.">VGA <input id="rng-vga" type="range" min="0" max="62" step="2"> <b id="vga-val"></b> dB</label>
+      <label data-tip="Tunes the HackRF's oscillator (LO) a little away from your frequency (10 % of the sample rate, at least 100 kHz), so the DC spike at the LO doesn't sit on your signal."><input type="checkbox" id="chk-offset" checked> Offset tuning</label>
+      <label data-tip="The antenna on the HackRF. Saved with recordings and used for the range warning.">Antenna <select id="sel-antenna"></select></label>
       <span id="ant-warn" class="warn small"></span>
     </div>
 
     <div class="readout">
-      <span class="rec-only">Time <b id="ro-time">0.000 s</b></span>
-      <span class="live-only">Tuned <b id="ro-tuned">–</b></span>
-      <span class="live-only">LO <b id="ro-lo">–</b></span>
-      <span class="scan-only">Range <b id="ro-range">–</b></span>
-      <span class="scan-only">Sweeps <b id="ro-sweeps">–</b></span>
-      <span><span class="no-scan">RBW</span><span class="scan-only">Bin</span> <b id="ro-rbw">–</b></span>
-      <span>Cursor <b id="ro-cursor">–</b></span>
-      <span>Noise floor (median) <b id="ro-floor">–</b></span>
-      <span class="no-scan">ADC level <b id="ro-level">–</b></span>
-      <span class="no-scan">Clipping <b id="ro-clip">–</b></span>
-      <span class="live-only">Overflows <b id="ro-ovf">0</b></span>
+      <span class="rec-only" data-tip="Position in the recording.">Time <b id="ro-time">0.000 s</b></span>
+      <span class="live-only" data-tip="The frequency you tuned to (dashed line).">Tuned <b id="ro-tuned">–</b></span>
+      <span class="live-only" data-tip="Where the HackRF's oscillator really is; its DC spike sits here. With offset tuning it is a little above your tuned frequency.">LO <b id="ro-lo">–</b></span>
+      <span class="scan-only" data-tip="The range being swept.">Range <b id="ro-range">–</b></span>
+      <span class="scan-only" data-tip="Sweeps completed, and how many per second.">Sweeps <b id="ro-sweeps">–</b></span>
+      <span data-tip="Resolution bandwidth: the noise bandwidth of one FFT bin (scan: the bin width). Floor per bin = noise density + 10·log10(RBW), so a smaller RBW lowers the floor for narrow signals."><span class="no-scan">RBW</span><span class="scan-only">Bin</span> <b id="ro-rbw">–</b></span>
+      <span data-tip="Frequency and level under the mouse.">Cursor <b id="ro-cursor">–</b></span>
+      <span data-tip="Median of all bins: a floor estimate that strong signals barely move. Shown per bin and per Hz (per Hz can be compared across FFT sizes).">Noise floor (median) <b id="ro-floor">–</b></span>
+      <span class="no-scan" data-tip="Total power of the samples relative to full scale. Below −35 dBFS the 8-bit converter barely sees the noise: raise the gain.">ADC level <b id="ro-level">–</b></span>
+      <span class="no-scan" data-tip="Share of samples at full scale. Above 0.1 % lower the gain: clipping creates false signals across the band.">Clipping <b id="ro-clip">–</b></span>
+      <span class="live-only" data-tip="Times the HackRF lost samples because the PC didn't read them in time.">Overflows <b id="ro-ovf">0</b></span>
+      <span id="ro-peak-wrap" class="hidden" data-tip="Highest peak-hold point on screen (the marker).">Peak <b id="ro-peak">–</b></span>
+      <span data-tip="How far you are zoomed in. Ctrl + wheel or a touchpad pinch zooms around the mouse; drag pans.">Zoom <b id="ro-zoom">full span</b></span>
+      <button id="btn-zoom-reset" class="small-btn" disabled data-tip="Back to the whole span.">Reset zoom</button>
     </div>
-    <p class="muted small scan-only">hackrf_sweep power is per bin, in dB relative to full scale (uncalibrated, like dBFS). Each line is the average of all sweeps since the previous one. There is no ADC level or clipping readout in scan mode: if strong signals look flat-topped, lower the gain.</p>
-    <p class="muted small live-only">Click a signal to tune to it. Drag sideways to move along the band. Mouse wheel: one step per notch (hold Shift for 10× finer). The dashed line is your tuned frequency.</p>
+    <p class="muted small scan-only">hackrf_sweep power is per bin, in dB relative to full scale (uncalibrated, like dBFS). Each line is the average of all sweeps since the previous one. There is no ADC level or clipping readout in scan mode: if strong signals look flat-topped, lower the gain. Mouse: wheel zooms, drag pans, click selects a signal.</p>
+    <p class="muted small live-only">Click a signal to tune to it. Drag to move along the band (zoomed in, it pans first and retunes at the edge). Wheel: one step per notch (Shift: 10× finer). Ctrl + wheel or pinch: zoom. The dashed line is your tuned frequency.</p>
+    <p class="muted small rec-only">Wheel or pinch: zoom around the mouse. Drag: pan. Spectrum and waterfall always show the same window.</p>
 
     <div class="plot">
       <canvas id="cv-spectrum"></canvas>
@@ -204,6 +218,7 @@
       <canvas id="cv-overview"></canvas>
     </div>
   </main>
+  <div id="tip" class="tip hidden"></div>
 
   <script src="/static/app.js"></script>
 </body>

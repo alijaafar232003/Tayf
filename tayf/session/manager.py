@@ -64,6 +64,7 @@ class SessionManager:
         self.store = store
         self.recordings_dir = Path(recordings_dir)
         self.last_saved: dict | None = None     # the most recent recording made from live
+        self.checking = False                   # a Receiver Check is changing the gains
         self.active: ActiveSession | None = None
         self.health: dict = {}
         self.rev = 0                    # bumps on every change, so paused views refresh
@@ -203,10 +204,34 @@ class SessionManager:
                     "offset_hz": src.offset_hz, "offset_tuning": src.offset_tuning,
                     "antenna_id": src.antenna_id, "overflows": src.overflows,
                     "recording": src.recording_status(), "last_saved": self.last_saved,
+                    "checking": self.checking,
                     "gains": {"amp": src.gains.amp, "lna_db": src.gains.lna_db,
                               "vga_db": src.gains.vga_db, "total_db": src.gains.total_db},
                 })
             return st
+
+    # --- receiver check -------------------------------------------------
+    def receiver_check(self, profile: dict | None) -> dict:
+        """Try a few gain settings on the live stream and suggest one (tayf.receiver.check).
+        Runs without holding the session lock, so the display keeps updating meanwhile."""
+        from ..receiver.check import run_check      # imported here: check uses measure_health from this module
+        with self._lock:
+            a = self._require()
+            if a.mode != "live":
+                raise RuntimeError("The Receiver Check needs live mode")
+            if a.source.recording:
+                raise RuntimeError("Stop the recording first: every gain step would become a new segment")
+            if self.checking:
+                raise RuntimeError("A Receiver Check is already running")
+            self.checking = True
+            self._changed()
+            src = a.source
+        try:
+            return run_check(src, profile)
+        finally:
+            with self._lock:
+                self.checking = False
+                self._changed()
 
     # --- control --------------------------------------------------------
     def control(self, cmd: dict) -> None:

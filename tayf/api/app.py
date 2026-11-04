@@ -24,6 +24,7 @@ from ..core.sigmf_io import DATATYPES, SigMFRecording, import_raw
 from ..session.manager import SessionManager
 from ..sources.radio import FREQ_RANGE, LNA_STEPS, SAMPLE_RATES, VGA_STEPS, find_hackrf
 from ..sources.sweep import BIN_WIDTHS
+from ..receiver.profile import load_profile
 from ..store.db import Store
 from .. import presets, synth
 
@@ -241,6 +242,23 @@ def create_app(data_dir: str | Path = "data") -> FastAPI:
         except RuntimeError as e:               # no device, device busy, hackrf_sweep missing
             raise HTTPException(503, f"Could not start the scan: {e}")
         return manager.status()
+
+    @app.get("/api/receiver/profile")
+    def receiver_profile():
+        """Summary of the receiver profile (notebook 02): how it was measured, and the
+        HackRF's own carriers, which the dashboard marks on the spectrum."""
+        p = load_profile(data_dir / "receiver")
+        if p is None:
+            return {"available": False}
+        return {"available": True, "condition": p.get("condition"), "created": p.get("created"),
+                "internal_carriers": p.get("internal_carriers", [])}
+
+    @app.post("/api/session/check")
+    def receiver_check():
+        try:
+            return manager.receiver_check(load_profile(data_dir / "receiver"))
+        except RuntimeError as e:
+            raise HTTPException(409, str(e))
 
     @app.post("/api/session/record")
     def record(body: RecordIn):

@@ -23,7 +23,10 @@ from ..core.models import IQBlock, ReceiverSettings, utc_now
 from ..core.sigmf_io import SigMFWriter, to_complex
 from .radio import FREQ_RANGE, Gains, Radio
 
-SETTLE_S = 0.01          # samples just after a retune or gain change are discarded
+# Samples just after a retune or gain change are discarded. USB transfers already
+# in flight still carry old samples: measured on this HackRF, the new setting shows
+# up 9-49 ms after the call (2-20 MS/s), so 60 ms covers it.
+SETTLE_S = 0.06
 
 
 def offset_for(sample_rate_hz: float) -> float:

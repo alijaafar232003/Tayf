@@ -49,9 +49,12 @@ const S = {
   antennas: [],         // antenna registry, for range warnings
   drag: null,           // live drag-to-tune / scan selection state
   presets: [],          // band presets (Lebanon, ITU Region 1)
-  hold: null,           // peak-hold trace {key, power}
-  sel: null,            // scan: selected frequency {hz} or range {lo, hi}
+  hold: null,           // peak-hold trace {f0, df, power, t}
+  smooth: null,         // smoothed trace {f0, df, lin, power}
+  zoom: null,           // display zoom {c, w}: centre and width in Hz; null = whole span
+  sel: null,            // scan: selected frequency {hz}
   lastScan: null,       // scan settings to return to after "Open live here"
+  carriers: [],         // the HackRF's own carriers, from the receiver profile
 };
 const M = { left: 52, right: 12, top: 8, bottom: 22 };   // plot margins (CSS px)
 
@@ -75,15 +78,46 @@ function spanOf(frame) {
   return [frame.f0 - frame.df / 2, frame.f0 + frame.df * (n - 0.5)];
 }
 const loOf = (frame) => frame.f0 + frame.df * frame.power.length / 2;   // center bin = LO
-// The frequency window on screen. While a retune is pending (dragging, wheel, click)
-// it is already the new window, so the view follows the mouse without waiting
-// for the radio; the old spectrum slides along until new data arrives.
-function viewSpan() {
+// The span the data covers. While a retune is pending (dragging, wheel, click) it
+// is already the new span, so the view follows the mouse without waiting for the
+// radio; the old spectrum slides along until new data arrives.
+function baseSpan() {
   const [lo, hi] = spanOf(S.frame);
   if (S.pending == null) return [lo, hi];
   const half = (hi - lo) / 2;
   return [S.pending.lo - half, S.pending.lo + half];
 }
+// The frequency window on screen: the whole span, or the zoomed part of it.
+// Spectrum, waterfall and every mouse action use this one window.
+function viewSpan() {
+  const [lo, hi] = baseSpan();
+  if (!S.zoom) return [lo, hi];
+  const w = Math.min(S.zoom.w, hi - lo);
+  const c = Math.min(Math.max(S.zoom.c, lo + w / 2), hi - w / 2);
+  return [c - w / 2, c + w / 2];
+}
+// Zoom by `factor` (< 1 = in) keeping the frequency `anchor` under the mouse.
+function zoomAt(anchor, factor) {
+  const [bLo, bHi] = baseSpan(), [vLo, vHi] = viewSpan();
+  const minW = 32 * S.frame.df;                     // closer than ~32 bins shows only blocks
+  const w = Math.min(bHi - bLo, Math.max(minW, (vHi - vLo) * factor));
+  if (w >= (bHi - bLo) * 0.999) { S.zoom = null; }
+  else {
+    const c = (vLo + vHi) / 2;
+    S.zoom = { c: anchor - (anchor - c) * w / (vHi - vLo), w };
+  }
+  showZoom();
+  scheduleDraw();
+}
+function showZoom() {
+  const [bLo, bHi] = S.frame ? baseSpan() : [0, 1];
+  const z = S.zoom ? (bHi - bLo) / Math.min(S.zoom.w, bHi - bLo) : 1;
+  $("ro-zoom").textContent = S.zoom ? `${z.toFixed(1)}× (view ${fmtHz(S.zoom.w, 1)})` : "full span";
+  $("btn-zoom-reset").disabled = !S.zoom;
+  $("btn-zoom").classList.toggle("hidden", !(S.zoom && S.status?.mode === "scan"));
+}
+// Frequency labels need more digits the closer you zoom.
+const axisDigits = (span) => Math.min(6, Math.max(3, Math.ceil(-Math.log10(span / 8 / 1e6)) + 1));
 // Resample a frame into `cols` pixel columns covering [vLo, vHi], max-hold so narrow
 // signals stay visible. Columns with no data (outside the frame) are NaN.
 function resample(frame, vLo, vHi, cols) {
@@ -128,11 +162,12 @@ function drawSpectrum() {
   }
   ctx.save(); ctx.translate(12 * b.r, b.y + b.h / 2); ctx.rotate(-Math.PI / 2);
   ctx.textAlign = "center"; ctx.fillText(S.status?.mode === "scan" ? "dB / bin" : "dBFS / bin", 0, 0); ctx.restore();
+  const digits = axisDigits(fHi - fLo);
   for (let i = 0; i <= 8; i++) {
     const hz = fLo + (fHi - fLo) * i / 8, x = xOf(hz);
     ctx.beginPath(); ctx.moveTo(x, b.y); ctx.lineTo(x, b.y + b.h); ctx.stroke();
     ctx.textAlign = i === 0 ? "left" : i === 8 ? "right" : "center";
-    ctx.fillText((hz / 1e6).toFixed(3), x, b.y + b.h + 15 * b.r);
+    ctx.fillText((hz / 1e6).toFixed(digits), x, b.y + b.h + 15 * b.r);
   }
 
   // annotations (truth for synthetic scenes, labels in SigMF files)
@@ -149,45 +184,53 @@ function drawSpectrum() {
 
   ctx.save(); ctx.beginPath(); ctx.rect(b.x, b.y, b.w, b.h); ctx.clip();
   if ($("chk-bands").checked) drawBands(ctx, b, xOf, fLo, fHi, css);
-  // Scan: the selected frequency or range
-  if (S.status?.mode === "scan" && S.sel) {
-    ctx.fillStyle = css.getPropertyValue("--sel"); ctx.strokeStyle = css.getPropertyValue("--tuned");
-    if (S.sel.hz != null) {
-      ctx.lineWidth = 1.5 * b.r; ctx.setLineDash([4 * b.r, 3 * b.r]);
-      const x = xOf(S.sel.hz); ctx.beginPath(); ctx.moveTo(x, b.y); ctx.lineTo(x, b.y + b.h); ctx.stroke();
-      ctx.setLineDash([]);
-    } else {
-      const x0 = xOf(Math.min(S.sel.lo, S.sel.hi)), x1 = xOf(Math.max(S.sel.lo, S.sel.hi));
-      ctx.fillRect(x0, b.y, x1 - x0, b.h);
+  // The HackRF's own carriers (receiver profile), so they are not taken for signals
+  if ($("chk-spurs").checked) {
+    ctx.strokeStyle = ctx.fillStyle = css.getPropertyValue("--spur");
+    ctx.lineWidth = 1 * b.r; ctx.setLineDash([2 * b.r, 3 * b.r]); ctx.textAlign = "left";
+    for (const c of S.carriers) {
+      if (c.freq_hz < fLo || c.freq_hz > fHi) continue;
+      const x = xOf(c.freq_hz);
+      ctx.beginPath(); ctx.moveTo(x, b.y + 20 * b.r); ctx.lineTo(x, b.y + b.h); ctx.stroke();
+      ctx.fillText("HackRF spur", x + 3 * b.r, b.y + 30 * b.r);
     }
+    ctx.setLineDash([]);
   }
-  // peak hold (drawn under the live trace)
+  // Scan: the selected frequency
+  if (S.status?.mode === "scan" && S.sel) {
+    ctx.strokeStyle = css.getPropertyValue("--tuned");
+    ctx.lineWidth = 1.5 * b.r; ctx.setLineDash([4 * b.r, 3 * b.r]);
+    const x = xOf(S.sel.hz); ctx.beginPath(); ctx.moveTo(x, b.y); ctx.lineTo(x, b.y + b.h); ctx.stroke();
+    ctx.setLineDash([]);
+  }
   const cols = Math.max(1, Math.floor(b.w));
-  if ($("chk-hold").checked && S.hold) {
-    const h = resample({ ...f, power: S.hold.power }, fLo, fHi, cols);
-    ctx.strokeStyle = css.getPropertyValue("--hold"); ctx.lineWidth = 1 * b.r;
+  const line = (vals, color, width) => {
+    ctx.strokeStyle = color; ctx.lineWidth = width;
     ctx.beginPath();
-    let pen2 = false;
+    let pen = false;
     for (let c = 0; c < cols; c++) {
-      if (isNaN(h[c])) { pen2 = false; continue; }
-      const x = b.x + c * b.w / cols, y = yOf(h[c]);
-      pen2 ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
-      pen2 = true;
+      if (isNaN(vals[c])) { pen = false; continue; }      // no data here yet
+      const x = b.x + c * b.w / cols, y = yOf(vals[c]);
+      pen ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+      pen = true;
     }
     ctx.stroke();
+  };
+  // peak hold (drawn under the trace), with a marker on its highest point in view
+  if (holdMode() !== "off" && S.hold) {
+    const h = resample(S.hold, fLo, fHi, cols);
+    line(h, css.getPropertyValue("--hold"), 1 * b.r);
+    let k = -1;
+    for (let c = 0; c < cols; c++) if (!isNaN(h[c]) && (k < 0 || h[c] > h[k])) k = c;
+    if (k >= 0) {
+      const x = b.x + (k + 0.5) * b.w / cols, y = yOf(h[k]);
+      ctx.fillStyle = css.getPropertyValue("--hold");
+      ctx.beginPath(); ctx.moveTo(x, y - 2 * b.r); ctx.lineTo(x - 5 * b.r, y - 10 * b.r); ctx.lineTo(x + 5 * b.r, y - 10 * b.r); ctx.fill();
+      $("ro-peak").textContent = `${fmtHz(fLo + (k + 0.5) * (fHi - fLo) / cols, digits + 1)}, ${h[k].toFixed(1)} dB`;
+    }
   }
-  // trace
-  const p = resample(f, fLo, fHi, cols);
-  ctx.strokeStyle = css.getPropertyValue("--trace"); ctx.lineWidth = 1.2 * b.r;
-  ctx.beginPath();
-  let pen = false;
-  for (let c = 0; c < cols; c++) {
-    if (isNaN(p[c])) { pen = false; continue; }          // no data here yet
-    const x = b.x + c * b.w / cols, y = yOf(p[c]);
-    pen ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
-    pen = true;
-  }
-  ctx.stroke();
+  // trace (smoothed if smoothing is on)
+  line(resample(S.smooth && smoothAlpha() < 1 ? S.smooth : f, fLo, fHi, cols), css.getPropertyValue("--trace"), 1.2 * b.r);
   if (S.cursorHz != null) {
     ctx.strokeStyle = css.getPropertyValue("--accent"); ctx.lineWidth = 1;
     const x = xOf(S.cursorHz); ctx.beginPath(); ctx.moveTo(x, b.y); ctx.lineTo(x, b.y + b.h); ctx.stroke();
@@ -218,62 +261,108 @@ function drawBands(ctx, b, xOf, fLo, fHi, css) {
 }
 
 // ---------- waterfall ----------
-// The waterfall image covers the frequency window [WF.lo, WF.hi]. After a retune
-// the image slides sideways so every past row stays at its true frequency
-// (like SDR++), instead of being cleared.
-const WF = { canvas: document.createElement("canvas"), lo: null, hi: null };
+// The waterfall keeps its rows as data (each frame's own frequencies and powers),
+// not as a picture. It is drawn for whatever window the spectrum shows, so zoom,
+// pan and retunes keep every past row sharp and at its true frequency (like SDR++).
+// Only a new row is drawn on its own; a change of view or colours redraws them all.
+const WF = { canvas: document.createElement("canvas"), rows: [], key: "", newRows: 0, view: null, sharpAt: 0, movedAt: 0 };
 function resetWaterfall() {
-  const cv = $("cv-waterfall"); fitCanvas(cv);
-  const b = plotBox(cv);
-  WF.canvas.width = Math.max(1, Math.floor(b.w));
-  WF.canvas.height = Math.max(1, Math.floor(cv.height - b.y - 4 * b.r));
-  WF.lo = WF.hi = null;
-  const c = WF.canvas.getContext("2d"); c.fillStyle = "#000"; c.fillRect(0, 0, WF.canvas.width, WF.canvas.height);
+  WF.rows = []; WF.key = ""; WF.newRows = 0; WF.view = null;
   drawWaterfall();
 }
-function alignWaterfall(lo, hi) {
-  if (WF.lo == null) { WF.lo = lo; WF.hi = hi; return; }
-  if (Math.abs((hi - lo) - (WF.hi - WF.lo)) > 1) {        // span changed (sample rate): start over
-    resetWaterfall(); WF.lo = lo; WF.hi = hi; return;
-  }
-  const w = WF.canvas.width, h = WF.canvas.height, c = WF.canvas.getContext("2d");
-  const hzPerPx = (hi - lo) / w;
-  const dx = Math.round((WF.lo - lo) / hzPerPx);          // whole pixels the old image moves
-  if (dx === 0) return;
-  c.drawImage(WF.canvas, 0, 0, w, h, dx, 0, w, h);
-  c.fillStyle = "#000";
-  dx > 0 ? c.fillRect(0, 0, dx, h) : c.fillRect(w + dx, 0, -dx, h);
-  // The image moved by a whole number of pixels; keep its window exact so new rows line up.
-  WF.lo -= dx * hzPerPx; WF.hi = WF.lo + (hi - lo);
-}
 function pushWaterfallRow(frame) {
-  const [fLo, fHi] = spanOf(frame);
-  alignWaterfall(fLo, fHi);
-  const w = WF.canvas.width, h = WF.canvas.height, c = WF.canvas.getContext("2d");
-  c.drawImage(WF.canvas, 0, 0, w, h - 1, 0, 1, w, h - 1);     // scroll down by one row
-  const [lo, hi] = dbRange(), p = resample(frame, WF.lo, WF.hi, w);
-  const img = c.createImageData(w, 1);
-  for (let i = 0; i < w; i++) {
-    const k = Math.max(0, Math.min(255, Math.round(255 * (p[i] - lo) / (hi - lo))));
-    img.data[4 * i] = LUT[3 * k]; img.data[4 * i + 1] = LUT[3 * k + 1]; img.data[4 * i + 2] = LUT[3 * k + 2]; img.data[4 * i + 3] = 255;
+  WF.rows.unshift(frame);
+  if (WF.rows.length > Math.max(WF.canvas.height, 50)) WF.rows.pop();
+  WF.newRows++;
+}
+// Which bins fall in each pixel column (same rule as resample). Rows on the same
+// frequency grid share one map, so a full redraw stays fast while zooming.
+function columnMap(row, vLo, vHi, w) {
+  const n = row.power.length, a = new Int32Array(w), b = new Int32Array(w);
+  const binOf = (hz) => Math.floor((hz - row.f0) / row.df + 0.5);
+  for (let c = 0; c < w; c++) {
+    let i = binOf(vLo + (vHi - vLo) * c / w), j = binOf(vLo + (vHi - vLo) * (c + 1) / w);
+    if (j <= i) j = i + 1;
+    if (j <= 0 || i >= n) { a[c] = b[c] = 0; continue; }
+    a[c] = Math.max(0, i); b[c] = Math.min(n, j);
   }
-  c.putImageData(img, 0, 0);
+  return [a, b];
+}
+function paintRows(img, w, from, to, vLo, vHi, lo, hi) {
+  const maps = new Map(), d = img.data, scale = 255 / (hi - lo);
+  for (let r = from; r < to; r++) {
+    const row = WF.rows[r], base = 4 * (r - from) * w;
+    if (!row) { for (let i = 0; i < w; i++) d[base + 4 * i + 3] = 255; continue; }   // black
+    const key = `${row.f0}|${row.df}|${row.power.length}`;
+    if (!maps.has(key)) maps.set(key, columnMap(row, vLo, vHi, w));
+    const [A, B] = maps.get(key), p = row.power;
+    for (let c = 0; c < w; c++) {
+      const o = base + 4 * c;
+      let m = -Infinity;
+      for (let i = A[c]; i < B[c]; i++) if (p[i] > m) m = p[i];       // max-hold, like the spectrum
+      d[o + 3] = 255;
+      if (m === -Infinity) { d[o] = d[o + 1] = d[o + 2] = 0; continue; }
+      const k = Math.max(0, Math.min(255, Math.round((m - lo) * scale)));
+      d[o] = LUT[3 * k]; d[o + 1] = LUT[3 * k + 1]; d[o + 2] = LUT[3 * k + 2];
+    }
+  }
+}
+// A full redraw (every row) costs tens of ms. While the view is moving (zoom, pan,
+// tuning) the last image is only stretched and slid into place, which is instant;
+// the sharp redraw follows when the mouse rests, and at least every WF_SHARP_MS
+// during a long drag so the waterfall never looks frozen.
+const WF_REST_MS = 150, WF_SHARP_MS = 300;
+let wfRestTimer = null;
+function renderWaterfall(w, h) {
+  const c = WF.canvas.getContext("2d");
+  if (WF.canvas.width !== w || WF.canvas.height !== h) { WF.canvas.width = w; WF.canvas.height = h; WF.key = ""; }
+  if (!S.frame) return;
+  const [vLo, vHi] = viewSpan(), now = performance.now();
+  // Colours follow the dB range; rounded so the slowly moving auto range does not
+  // force a full redraw on every frame.
+  const [lo, hi] = dbRange().map((v) => Math.round(v * 2) / 2);
+  if (!WF.seen || WF.seen[0] !== vLo || WF.seen[1] !== vHi) { WF.seen = [vLo, vHi]; WF.movedAt = now; }
+  const key = `${vLo}|${vHi}|${lo}|${hi}|${w}|${h}`;
+  if (key !== WF.key) {
+    const onlyMoved = WF.view && WF.db[0] === lo && WF.db[1] === hi && WF.size === `${w}|${h}`;
+    if (onlyMoved && now - WF.movedAt < WF_REST_MS && now - WF.sharpAt < WF_SHARP_MS) {
+      clearTimeout(wfRestTimer);
+      wfRestTimer = setTimeout(scheduleDraw, WF_REST_MS);   // sharpen once the mouse rests
+      return;
+    }
+    const img = c.createImageData(w, h);
+    paintRows(img, w, 0, h, vLo, vHi, lo, hi);
+    c.putImageData(img, 0, 0);
+    Object.assign(WF, { key, view: [vLo, vHi], db: [lo, hi], size: `${w}|${h}`, sharpAt: performance.now(), newRows: 0 });
+    return;
+  }
+  if (WF.newRows > 0) {
+    const n = Math.min(WF.newRows, h);
+    c.drawImage(WF.canvas, 0, 0, w, h - n, 0, n, w, h - n);   // scroll the old rows down
+    const img = c.createImageData(w, n);
+    paintRows(img, w, 0, n, vLo, vHi, lo, hi);
+    c.putImageData(img, 0, 0);
+    WF.newRows = 0;
+  }
 }
 function drawWaterfall() {
   const cv = $("cv-waterfall");
-  if (fitCanvas(cv)) return resetWaterfall();
+  fitCanvas(cv);
   const ctx = cv.getContext("2d"), b = plotBox(cv);
+  const w = Math.max(1, Math.floor(b.w)), h = Math.max(1, Math.floor(cv.height - b.y - 4 * b.r));
+  renderWaterfall(w, h);
   ctx.clearRect(0, 0, cv.width, cv.height);
-  ctx.imageSmoothingEnabled = false;
-  // Place the image at its own frequencies inside the current view (shifts while tuning).
-  let x = b.x;
-  if (S.frame && WF.lo != null) {
+  ctx.save(); ctx.beginPath(); ctx.rect(b.x, b.y, b.w, h); ctx.clip();
+  ctx.fillStyle = "#000"; ctx.fillRect(b.x, b.y, b.w, h);
+  // The image covers WF.view; place it inside the current view (stretched while moving).
+  let x = b.x, iw = b.w;
+  if (S.frame && WF.view) {
     const [vLo, vHi] = viewSpan();
-    x = b.x + (WF.lo - vLo) / (vHi - vLo) * b.w;
+    x = b.x + (WF.view[0] - vLo) / (vHi - vLo) * b.w;
+    iw = (WF.view[1] - WF.view[0]) / (vHi - vLo) * b.w;
   }
-  ctx.save(); ctx.beginPath(); ctx.rect(b.x, b.y, b.w, WF.canvas.height); ctx.clip();
-  ctx.fillStyle = "#000"; ctx.fillRect(b.x, b.y, b.w, WF.canvas.height);
-  ctx.drawImage(WF.canvas, x, b.y, b.w, WF.canvas.height);
+  ctx.imageSmoothingEnabled = iw > b.w * 1.5;           // smooth only while stretched a lot
+  ctx.drawImage(WF.canvas, x, b.y, iw, h);
   ctx.restore();
   ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue("--muted");
   ctx.font = `${11 * b.r}px system-ui`; ctx.textAlign = "right";
@@ -325,6 +414,7 @@ function onFrame(buf) {
   const frame = { offset: h[0], f0: h[1], df: h[2], rbw: h[3], power: new Float32Array(buf, 32) };
   S.frame = frame;
   updateHold(frame);
+  updateSmooth(frame);
   // The retune we asked for has arrived: stop showing the predicted view.
   if (S.pending && !S.drag && !S.pending.unsent && Math.abs(loOf(frame) - S.pending.lo) < 2 * frame.df) S.pending = null;
   if (S.pending && performance.now() - S.pending.t > 2000 && !S.drag) S.pending = null;   // give up waiting
@@ -341,12 +431,47 @@ function onFrame(buf) {
   if (S.status?.playing) pushWaterfallRow(frame);
   scheduleDraw();
 }
-// Peak hold: max per bin since the grid last changed (retune, new range, new FFT size).
+// Peak hold and smoothing keep one value per bin. After a retune the bins move to
+// new frequencies: shift the kept values by whole bins so each stays at its true
+// frequency (as the waterfall does). A new bin width (FFT size, rate, scan bin) starts over.
+function regrid(state, frame, key) {
+  const n = frame.power.length;
+  if (!state || state.df !== frame.df || state[key].length !== n) return null;
+  const shift = Math.round((frame.f0 - state.f0) / frame.df);
+  if (shift === 0) return state;
+  const out = new Float32Array(n).fill(NaN), old = state[key];
+  for (let i = Math.max(0, -shift); i < Math.min(n, n - shift); i++) out[i] = old[i + shift];
+  return { ...state, f0: state.f0 + shift * frame.df, [key]: out };
+}
+const holdMode = () => $("sel-hold").value;              // off | hold | decay
+const HOLD_DECAY_DB_S = 10;
 function updateHold(frame) {
-  const key = `${frame.f0}|${frame.df}|${frame.power.length}`;
-  if (!S.hold || S.hold.key !== key) { S.hold = { key, power: Float32Array.from(frame.power) }; return; }
-  const h = S.hold.power, p = frame.power;
-  for (let i = 0; i < p.length; i++) if (!(h[i] >= p[i])) h[i] = isNaN(p[i]) ? h[i] : p[i];
+  if (holdMode() === "off") { S.hold = null; return; }
+  const now = performance.now(), p = frame.power;
+  S.hold = regrid(S.hold, frame, "power");
+  if (!S.hold) { S.hold = { f0: frame.f0, df: frame.df, power: Float32Array.from(p), t: now }; return; }
+  const h = S.hold.power, fall = holdMode() === "decay" ? HOLD_DECAY_DB_S * (now - S.hold.t) / 1000 : 0;
+  for (let i = 0; i < p.length; i++) {
+    const v = h[i] - fall;                               // decay: old peaks sink slowly
+    h[i] = isNaN(p[i]) ? v : !(v >= p[i]) ? p[i] : v;
+  }
+  S.hold.t = now;
+}
+// Smoothing: each bin's power (linear, not dB) is a running average over recent
+// frames. Steady signals stand out of a calmer floor; short bursts get flattened.
+const SMOOTH = { off: 1, light: 0.5, medium: 0.2, heavy: 0.07 };
+const smoothAlpha = () => SMOOTH[$("sel-smooth").value];
+function updateSmooth(frame) {
+  const a = smoothAlpha(), p = frame.power;
+  if (a >= 1) { S.smooth = null; return; }
+  S.smooth = regrid(S.smooth, frame, "lin");
+  if (!S.smooth) S.smooth = { f0: frame.f0, df: frame.df, lin: new Float32Array(p.length).fill(NaN), power: new Float32Array(p.length) };
+  const L = S.smooth.lin, out = S.smooth.power;
+  for (let i = 0; i < p.length; i++) {
+    const x = 10 ** (p[i] / 10);
+    L[i] = isNaN(L[i]) ? x : isNaN(x) ? L[i] : L[i] + a * (x - L[i]);
+    out[i] = 10 * Math.log10(L[i]);
+  }
 }
 let drawPending = false;
 function scheduleDraw() {
@@ -382,11 +507,14 @@ function setStatus(st) {
   $("sel-nfft").value = String(st.nfft);
   $("chk-dc").checked = st.dc_remove;
   showHealth(st);
+  showZoom();
   $("an-title").textContent = st.name;
   if (scan) {
     showScan(st);
   } else if (live) {
     $("btn-live-back").classList.toggle("hidden", !S.lastScan);
+    if (st.session_id !== prevId) $("check-panel").classList.add("hidden");
+    $("btn-check").disabled = !!st.checking || !!st.recording;
     if (document.activeElement !== $("in-freq") && !S.pending) $("in-freq").value = (st.tuned_hz / 1e6).toFixed(4);
     $("sel-rate").value = String(st.sample_rate_hz);
     $("chk-amp").checked = st.gains.amp;
@@ -526,10 +654,14 @@ $("rng-vga").onchange = (e) => control({ vga_db: parseInt(e.target.value) });
 $("chk-offset").onchange = (e) => control({ offset_tuning: e.target.checked });
 $("sel-antenna").onchange = (e) => control({ antenna_id: e.target.value });
 
-// Mouse on the spectrum or waterfall (live only):
-//  - drag sideways: the band moves with the mouse, like dragging a map
-//  - click: tune to the clicked frequency (the dashed line jumps there)
-//  - wheel: one step per notch (Shift = 10x finer); quick notches add up
+// Mouse on the spectrum or waterfall (they share one view, so both behave the same):
+//  - Ctrl + wheel (or touchpad pinch): zoom around the mouse. In recordings and
+//    scans, where the wheel has nothing to tune, the plain wheel zooms too.
+//  - drag sideways: the view moves like a map. Live: zoomed in, it pans within what
+//    the radio receives and retunes only when you drag past the edge; at full span
+//    it retunes as you drag.
+//  - click: live = tune there; scan = select the signal (snaps to its peak).
+//  - wheel (live): one tuning step per notch (Shift = 10x finer); quick notches add up.
 function hzAtMouse(cv, e) {
   const b = plotBox(cv), x = (e.clientX - cv.getBoundingClientRect().left) * b.r;
   const [vLo, vHi] = viewSpan();
@@ -538,21 +670,21 @@ function hzAtMouse(cv, e) {
 for (const id of ["cv-spectrum", "cv-waterfall"]) {
   const cv = $(id);
   cv.addEventListener("mousedown", (e) => {
-    if (S.status?.mode === "scan" && S.frame && e.button === 0) {
-      S.drag = { cv, scan: true, x0: e.clientX, hz0: hzAtMouse(cv, e), moved: false };
-      e.preventDefault();
-      return;
-    }
-    if (S.status?.mode !== "live" || !S.frame || e.button !== 0) return;
+    if (!S.status?.active || !S.frame || e.button !== 0) return;
     const [vLo, vHi] = viewSpan();
-    S.drag = { cv, x0: e.clientX, start: currentTuned(), moved: false,
-               hzPerPx: (vHi - vLo) / plotBox(cv).w * (window.devicePixelRatio || 1) };
+    S.drag = { cv, x0: e.clientX, moved: false, start: S.status.mode === "live" ? currentTuned() : null,
+               c0: (vLo + vHi) / 2, hzPerPx: (vHi - vLo) / plotBox(cv).w * (window.devicePixelRatio || 1) };
     cv.classList.add("dragging");
     e.preventDefault();
   });
   cv.addEventListener("wheel", (e) => {
-    if (S.status?.mode !== "live" || !S.frame) return;
+    if (!S.status?.active || !S.frame) return;
     e.preventDefault();
+    const live = S.status.mode === "live";
+    if (e.ctrlKey || !live) {
+      zoomAt(hzAtMouse(cv, e), Math.exp(e.deltaY * 0.0025));   // one notch ≈ 22 %; a pinch sends many small steps
+      return;
+    }
     const step = parseFloat($("sel-step").value) / (e.shiftKey ? 10 : 1);
     const base = Math.round(currentTuned() / step) * step;
     setPending(base + (e.deltaY < 0 ? step : -step));
@@ -560,27 +692,41 @@ for (const id of ["cv-spectrum", "cv-waterfall"]) {
   }, { passive: false });
 }
 window.addEventListener("mousemove", (e) => {
-  if (!S.drag) return;
-  const dx = e.clientX - S.drag.x0;
-  if (Math.abs(dx) > 3) S.drag.moved = true;
-  if (!S.drag.moved) return;
-  if (S.drag.scan) { setSelection({ lo: S.drag.hz0, hi: hzAtMouse(S.drag.cv, e) }); return; }
-  setPending(S.drag.start - dx * S.drag.hzPerPx);
-  sendPending();
+  const d = S.drag;
+  if (!d) return;
+  const dx = e.clientX - d.x0;
+  if (Math.abs(dx) > 3) d.moved = true;
+  if (!d.moved) return;
+  if (!S.zoom) {
+    if (d.start != null) { setPending(d.start - dx * d.hzPerPx); sendPending(); }   // live, full span: tune
+    return;
+  }
+  // Zoomed: pan the view. Live: if that leaves what the radio receives, retune by the overshoot.
+  S.zoom.c = d.c0 - dx * d.hzPerPx;
+  if (d.start != null) {
+    const [bLo, bHi] = baseSpan(), half = S.zoom.w / 2;
+    const over = S.zoom.c + half > bHi ? S.zoom.c + half - bHi : S.zoom.c - half < bLo ? S.zoom.c - half - bLo : 0;
+    if (over !== 0) { setPending(currentTuned() + over); sendPending(); }
+  } else {
+    const [bLo, bHi] = baseSpan();                    // recordings and scans: stay inside the data
+    S.zoom.c = Math.min(Math.max(S.zoom.c, bLo + S.zoom.w / 2), bHi - S.zoom.w / 2);
+  }
+  scheduleDraw();
 });
 window.addEventListener("mouseup", (e) => {
-  if (!S.drag) return;
   const d = S.drag;
-  if (d.scan) {
-    S.drag = null;
+  if (!d) return;
+  d.cv.classList.remove("dragging");
+  S.drag = null;
+  if (S.status?.mode === "scan") {
     if (!d.moved) setSelection({ hz: snapToPeak(hzAtMouse(d.cv, e)) });
     return;
   }
-  d.cv.classList.remove("dragging");
-  if (!d.moved) setPending(hzAtMouse(d.cv, e));         // a click: tune to that frequency
-  S.drag = null;
+  if (d.start == null) return;                        // recordings: drag only pans
+  if (!d.moved) setPending(hzAtMouse(d.cv, e));       // a click: tune to that frequency
   sendPending(true);
 });
+$("btn-zoom-reset").onclick = () => { S.zoom = null; showZoom(); scheduleDraw(); };
 for (const id of ["db-min", "db-max", "chk-truth"]) $(id).oninput = scheduleDraw;
 $("cv-overview").onclick = (e) => {
   if (!S.overviewBox || !S.status) return;
@@ -601,7 +747,7 @@ for (const id of ["cv-spectrum", "cv-waterfall"]) {
   };
   cv.onmouseleave = () => { S.cursorHz = null; scheduleDraw(); };
 }
-window.addEventListener("resize", () => { resetWaterfall(); scheduleDraw(); });
+window.addEventListener("resize", scheduleDraw);            // the waterfall redraws from its rows
 
 // ---------- scan: select, zoom, open live ----------
 // A click picks the strongest bin within a few pixels, so you land on the signal.
@@ -616,28 +762,25 @@ function snapToPeak(hz) {
 }
 function setSelection(sel) {
   S.sel = sel;
-  const point = sel?.hz != null, range = !!sel && !point;
-  $("scan-actions").classList.toggle("hidden", !point);
-  $("btn-zoom").classList.toggle("hidden", !range);
-  if (point) {
+  $("scan-actions").classList.toggle("hidden", !sel);
+  if (sel) {
     const i = Math.round((sel.hz - S.frame.f0) / S.frame.df), p = S.frame.power[i];
     $("scan-sel").textContent = `Selected ${fmtHz(sel.hz, 4)}` + (p == null || isNaN(p) ? "" : ` (${p.toFixed(1)} dB)`);
-  } else if (range) {
-    const lo = Math.min(sel.lo, sel.hi), hi = Math.max(sel.lo, sel.hi);
-    $("scan-sel").textContent = `Range ${fmtHz(lo, 3)} – ${fmtHz(hi, 3)} (${fmtHz(hi - lo, 1)})`;
   } else {
-    $("scan-sel").textContent = "Click a signal to select it, or drag across a range to zoom in.";
+    $("scan-sel").textContent = "Click a signal to select it. Wheel zooms, drag pans; zoomed in, \"Scan this range\" rescans just that part with finer bins.";
   }
   scheduleDraw();
 }
 async function scanControl(body) {
   setSelection(null);
   $("scan-sel").textContent = "Restarting the sweep…";
-  try { setStatus(await api("/api/session/control", { method: "POST", body })); setSelection(null); }
-  catch (e) { $("scan-sel").textContent = e.message; }
+  try {
+    setStatus(await api("/api/session/control", { method: "POST", body }));
+    S.zoom = null; showZoom(); setSelection(null);
+  } catch (e) { $("scan-sel").textContent = e.message; }
 }
 $("btn-zoom").onclick = () => {
-  const lo = Math.min(S.sel.lo, S.sel.hi), hi = Math.max(S.sel.lo, S.sel.hi);
+  const [lo, hi] = viewSpan();                        // rescan what is on screen
   // A narrower range can afford finer bins: aim for 1000-4000 bins.
   const bins = S.binWidths.filter((w) => (hi - lo) / w <= 4000);
   const bin = bins.find((w) => (hi - lo) / w >= 1000) ?? bins[bins.length - 1] ?? S.binWidths[0];
@@ -672,14 +815,16 @@ $("scan-amp").onchange = (e) => scanControl({ amp: e.target.checked });
 $("scan-lna").onchange = (e) => scanControl({ lna_db: parseInt(e.target.value) });
 $("scan-vga").onchange = (e) => scanControl({ vga_db: parseInt(e.target.value) });
 $("scan-ant").onchange = (e) => control({ antenna_id: e.target.value });
-$("chk-hold").onchange = () => { S.hold = null; scheduleDraw(); };
-$("chk-bands").onchange = scheduleDraw;
+$("sel-hold").onchange = () => { S.hold = null; $("ro-peak").textContent = "–"; $("ro-peak-wrap").classList.toggle("hidden", holdMode() === "off"); scheduleDraw(); };
+$("btn-hold-clear").onclick = () => { S.hold = null; scheduleDraw(); };
+$("sel-smooth").onchange = () => { S.smooth = null; scheduleDraw(); };
+$("chk-bands").onchange = $("chk-spurs").onchange = scheduleDraw;
 
 // ---------- views ----------
 function showView(name) {
   $("home").classList.toggle("hidden", name !== "home");
   $("analysis").classList.toggle("hidden", name !== "analysis");
-  if (name === "analysis") { S.auto.init = false; resetWaterfall(); scheduleDraw(); }
+  if (name === "analysis") { S.auto.init = false; S.zoom = null; S.smooth = null; resetWaterfall(); showZoom(); scheduleDraw(); }
 }
 async function openLive(body) {
   setStatus(await api("/api/session/live", { method: "POST", body }));
@@ -702,6 +847,8 @@ async function loadOptions() {
   $("scan-live-rate").value = "10000000";
   S.binWidths = o.bin_widths;
   S.presets = await api("/api/presets");
+  const prof = await api("/api/receiver/profile");
+  S.carriers = prof.available ? prof.internal_carriers : [];
   const popts = S.presets.map((b) => `<option value="${esc(b.id)}">${esc(b.name)}${b.verified ? "" : " (to verify)"}</option>`).join("");
   for (const el of document.querySelectorAll(".sel-preset")) el.innerHTML = '<option value="">custom range</option>' + popts;
 }
@@ -763,6 +910,74 @@ $("live-form").onsubmit = async (e) => {
     $("live-msg").textContent = "";
   } catch (err) { $("live-msg").textContent = err.message; }
 };
+// ---------- Receiver Check ----------
+$("btn-check").onclick = async () => {
+  const panel = $("check-panel");
+  panel.classList.remove("hidden");
+  panel.innerHTML = "<h3>Receiver Check</h3><p class=\"muted\">Trying 8 gain settings (about 2 seconds)… the spectrum jumps while it runs.</p>";
+  $("btn-check").disabled = true;
+  try { showCheck(await api("/api/session/check", { method: "POST" })); }
+  catch (e) { panel.innerHTML = `<h3>Receiver Check</h3><p class="warn">${esc(e.message)}</p>`; }
+  finally { $("btn-check").disabled = false; }
+};
+function showCheck(r) {
+  const s = r.suggestion, cur = S.status.gains;
+  const same = s.lna_db === cur.lna_db && s.vga_db === cur.vga_db && s.amp === cur.amp;
+  const prof = r.profile
+    ? `Compared with the receiver profile measured with the ${esc(r.profile.condition)} (${esc((r.profile.created || "").slice(0, 10))}, fit at ${fmtHz(r.profile.fit_at_hz, 0)}).` +
+      (r.profile.condition === "antenna removed" ? " Rerun notebook 02 with the 50 Ω load when it arrives." : "")
+    : "No receiver profile yet: run notebook 02.";
+  const spurs = r.known_carriers.length
+    ? `HackRF spurs in this span (marked on the spectrum): ${r.known_carriers.map((c) => fmtHz(c.freq_hz, 3)).join(", ")}.`
+    : "No known HackRF spurs in this span.";
+  const ref = r.rows[0].ref_snr_db.length;
+  const rows = r.rows.map((x) => {
+    const best = x.lna_db === s.lna_db && x.vga_db === s.vga_db;
+    return `<tr class="${best ? "best" : x.problems.length ? "bad" : ""}">
+      <td>${x.lna_db}</td><td>${x.vga_db}</td><td>${x.level_dbfs.toFixed(1)}</td><td>${x.clip_pct.toFixed(2)}</td>
+      <td>${x.floor_dbfs_hz.toFixed(1)}</td><td>${(x.floor_dbfs_hz - x.total_db).toFixed(1)}</td>
+      <td>${x.outside_db == null ? "–" : x.outside_db.toFixed(1)}</td>
+      ${ref ? `<td>${x.ref_snr_db.map((v) => v.toFixed(0)).join(" / ")}</td>` : ""}
+      <td style="text-align:left">${best ? "suggested" : x.problems.join(", ")}</td></tr>`;
+  }).join("");
+  $("check-panel").innerHTML = `
+    <button class="close small-btn" onclick="this.parentElement.classList.add('hidden')">Close</button>
+    <h3>Receiver Check at ${fmtHz(r.tuned_hz, 3)} · ${fmtRate(r.sample_rate_hz)} · ${r.seconds} s</h3>
+    <div class="suggest">Suggested: <b>LNA ${s.lna_db} dB, VGA ${s.vga_db} dB</b>, amp ${s.amp ? "on" : "off"}
+      ${same ? '<span class="ok">(what you have now)</span>' : '<button id="btn-check-apply">Apply</button>'}
+      <span class="muted small">Before the check: LNA ${r.before.lna_db}, VGA ${r.before.vga_db} (restored).</span></div>
+    <ul>${r.why.map((w) => `<li>${esc(w)}</li>`).join("")}
+      <li>${esc(r.floor)}</li><li>${spurs}</li><li class="muted">${prof}</li></ul>
+    <details><summary>All settings tried</summary>
+      <table><tr><th>LNA</th><th>VGA</th><th>ADC level dBFS</th><th>clip %</th><th>floor dBFS/Hz</th>
+        <th title="floor minus total gain: lower = more sensitive">input-referred</th><th title="floor above the HackRF's own (profile)">outside dB</th>
+        ${ref ? "<th>SNR of reference signals dB</th>" : ""}<th></th></tr>${rows}</table></details>`;
+  const apply = $("btn-check-apply");
+  if (apply) apply.onclick = async () => { await control({ amp: s.amp, lna_db: s.lna_db, vga_db: s.vga_db }); showCheck(r); };
+}
+
+// ---------- tooltips ----------
+// Any element with data-tip explains itself after a short hover.
+let tipTimer = null, tipFor = null;
+document.addEventListener("mouseover", (e) => {
+  const el = e.target.closest?.("[data-tip]");
+  if (el === tipFor) return;
+  tipFor = el;
+  clearTimeout(tipTimer);
+  $("tip").classList.add("hidden");
+  if (!el) return;
+  tipTimer = setTimeout(() => {
+    const tip = $("tip"), r = el.getBoundingClientRect();
+    tip.textContent = el.dataset.tip;
+    tip.classList.remove("hidden");
+    const w = tip.offsetWidth, h = tip.offsetHeight;
+    const x = Math.min(Math.max(8, r.left), window.innerWidth - w - 8);
+    const y = r.bottom + 6 + h > window.innerHeight ? r.top - h - 6 : r.bottom + 6;
+    tip.style.left = x + "px"; tip.style.top = y + "px";
+  }, 350);
+});
+document.addEventListener("mousedown", () => { clearTimeout(tipTimer); $("tip").classList.add("hidden"); });
+
 // ---------- antenna drawings ----------
 // Small illustrations so you can tell which antenna is which. Not to scale.
 const ANT_INFO = {
