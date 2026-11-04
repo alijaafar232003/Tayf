@@ -21,7 +21,7 @@ import numpy as np
 
 from ..dsp.dc import remove_dc
 from ..dsp.spectrum import rbw_hz, welch_power
-from ..session.manager import measure_health
+from ..dsp.health import measure_health
 from ..sources.radio import LNA_STEPS, VGA_STEPS, Gains
 from .characterize import floor_model
 

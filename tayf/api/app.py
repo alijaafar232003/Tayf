@@ -100,6 +100,7 @@ class ControlIn(BaseModel):
     vga_db: int | None = None
     offset_tuning: bool | None = None
     antenna_id: str | None = None
+    agc: bool | None = None
     # scan
     f_lo_hz: float | None = None
     f_hi_hz: float | None = None

@@ -6,6 +6,7 @@ the HackRF. Everything downstream asks the manager for frames.
 from __future__ import annotations
 
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -14,7 +15,11 @@ import numpy as np
 from ..core.models import IQBlock, SpectrumFrame, SweepFrame, utc_now
 from ..core.sigmf_io import SigMFRecording
 from ..dsp.dc import remove_dc
+from ..dsp.health import measure_health
 from ..dsp.spectrum import overview_rows, spectrum_frame
+from ..receiver.agc import AGC
+from ..receiver.check import fit_for, run_check
+from ..receiver.profile import load_profile
 from ..sources.live import LiveSource
 from ..sources.radio import LNA_STEPS, SAMPLE_RATES, VGA_STEPS, Gains, HackRFRadio, SimRadio, snap_gain
 from ..sources.recording import RecordingSource
@@ -24,9 +29,6 @@ from ..store.db import Store
 MAX_SAMPLES_PER_FRAME = 262_144     # caps CPU per frame at high sample rates
 NFFT_CHOICES = (256, 512, 1024, 2048, 4096, 8192, 16384)
 
-# ADC level guide for an 8-bit receiver (total power of the samples, dBFS)
-LEVEL_LOW_DBFS = -35.0      # below this, quantization noise starts to dominate
-CLIP_WARN = 0.001           # more than 0.1 % of samples at full scale
 
 
 @dataclass
@@ -49,22 +51,14 @@ class ActiveSession:
     preset_id: str | None = None        # scan: the band preset it started from
 
 
-def measure_health(block: IQBlock) -> dict:
-    """ADC level and clipping of one block. Clipping is when I or Q hits full scale."""
-    x = block.samples
-    clipped = (np.abs(x.real) >= 127 / 128) | (np.abs(x.imag) >= 127 / 128)
-    level = 10 * np.log10(np.mean(np.abs(x) ** 2) + 1e-20)
-    clip = float(clipped.mean())
-    hint = "clipping" if clip > CLIP_WARN else "low" if level < LEVEL_LOW_DBFS else "ok"
-    return {"level_dbfs": round(float(level), 1), "clip_pct": round(100 * clip, 3), "level_hint": hint}
-
-
 class SessionManager:
     def __init__(self, store: Store, recordings_dir: str | Path = "data/recordings"):
         self.store = store
         self.recordings_dir = Path(recordings_dir)
         self.last_saved: dict | None = None     # the most recent recording made from live
         self.checking = False                   # a Receiver Check is changing the gains
+        self.agc: AGC | None = None             # automatic gain control (live), None = off
+        self.profile_dir = self.recordings_dir.parent / "receiver"
         self.active: ActiveSession | None = None
         self.health: dict = {}
         self.rev = 0                    # bumps on every change, so paused views refresh
@@ -101,6 +95,7 @@ class SessionManager:
             source.start()
             sid = self.store.start_session("live", source.settings)
             self.active = ActiveSession(sid, "live", source, playback=Playback(playing=True))
+            self.agc = None
             self._changed()
             return self.active
 
@@ -135,6 +130,7 @@ class SessionManager:
                 self.store.end_session(self.active.id)
                 self.active = None
                 self.health = {}
+                self.agc = None
                 self._changed()
 
     def _changed(self) -> None:
@@ -205,6 +201,8 @@ class SessionManager:
                     "antenna_id": src.antenna_id, "overflows": src.overflows,
                     "recording": src.recording_status(), "last_saved": self.last_saved,
                     "checking": self.checking,
+                    "agc": {"on": self.agc is not None, "last": self.agc.last_action if self.agc else "",
+                            "changes": self.agc.changes if self.agc else 0},
                     "gains": {"amp": src.gains.amp, "lna_db": src.gains.lna_db,
                               "vga_db": src.gains.vga_db, "total_db": src.gains.total_db},
                 })
@@ -214,7 +212,6 @@ class SessionManager:
     def receiver_check(self, profile: dict | None) -> dict:
         """Try a few gain settings on the live stream and suggest one (tayf.receiver.check).
         Runs without holding the session lock, so the display keeps updating meanwhile."""
-        from ..receiver.check import run_check      # imported here: check uses measure_health from this module
         with self._lock:
             a = self._require()
             if a.mode != "live":
@@ -266,7 +263,10 @@ class SessionManager:
                     src.tune(float(cmd["center_hz"]))
                 if "offset_tuning" in cmd:
                     src.set_offset_tuning(bool(cmd["offset_tuning"]))
+                if "agc" in cmd:
+                    self._set_agc(bool(cmd["agc"]))
                 if {"amp", "lna_db", "vga_db"} & cmd.keys():
+                    self.agc = None             # a manual gain change takes over from the AGC
                     g = src.gains
                     src.set_gains(Gains(bool(cmd.get("amp", g.amp)),
                                         snap_gain(cmd.get("lna_db", g.lna_db), LNA_STEPS),
@@ -315,9 +315,33 @@ class SessionManager:
         speed = a.playback.speed if a.mode == "recording" else 1.0
         return max(a.playback.nfft, int(fs * speed / a.playback.fps))
 
+    # --- automatic gain control -------------------------------------------
+    def _set_agc(self, on: bool) -> None:
+        if not on:
+            self.agc = None
+        elif self.agc is None:
+            self.agc = AGC(profile=load_profile(self.profile_dir))
+
+    def _agc_step(self, a: ActiveSession) -> None:
+        """Called with each live frame's health; the AGC itself decides whether to act."""
+        if self.agc is None or self.checking:
+            return
+        src = a.source
+        # The gain rule depends on frequency (front-end noise differs): use the profile
+        # fit nearest to where we are tuned, refreshed after a big retune.
+        if self.agc.fit_for_hz is None or abs(np.log10(self.agc.fit_for_hz / src.tuned_hz)) > 0.3:
+            self.agc.fit = fit_for(self.agc.profile, src.tuned_hz)
+            self.agc.fit_for_hz = src.tuned_hz
+        new, _ = self.agc.update(time.monotonic(), self.health, src.gains)
+        if new is not None:
+            src.set_gains(new)
+            self._changed()
+
     def _to_frame(self, a: ActiveSession, block: IQBlock) -> SpectrumFrame:
         block.samples = block.samples[:MAX_SAMPLES_PER_FRAME]
         self.health = measure_health(block)
+        if a.mode == "live":
+            self._agc_step(a)
         if a.playback.dc_remove:
             block.samples = remove_dc(block.samples)
         return spectrum_frame(block, a.playback.nfft)

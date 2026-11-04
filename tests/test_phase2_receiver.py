@@ -96,3 +96,55 @@ def test_check_session_rules(tmp_path):
         assert not m.status()["checking"]
     finally:
         m.close()
+
+
+# --- AGC -------------------------------------------------------------------------
+
+from tayf.receiver.agc import AGC, step_down, step_up   # noqa: E402
+from tayf.sources.radio import Gains   # noqa: E402
+
+
+def test_agc_steps_follow_the_gain_rule():
+    g = Gains(False, 16, 40)
+    assert step_down(g, FIT) == Gains(False, 16, 34)            # VGA first
+    floor = vga_to_clear_adc(FIT, 16)
+    low = Gains(False, 16, floor)
+    assert step_down(low, FIT).lna_db == 8                       # then LNA, once VGA is at the rule's minimum
+    assert step_up(Gains(False, 0, 0), FIT) == Gains(False, 8, 0)       # LNA first going up...
+    v32 = vga_to_clear_adc(FIT, 32)
+    assert step_up(Gains(False, 32, 0), FIT) == Gains(False, 32, 4)     # ...then VGA up to the rule...
+    assert step_up(Gains(False, 32, v32), FIT) == Gains(False, 40, v32) # ...then the last LNA step
+    assert step_up(Gains(False, 40, 62), FIT) is None and step_down(Gains(False, 0, 0), FIT) is None
+
+
+def test_agc_is_calm():
+    a, g = AGC(fit=FIT), Gains(False, 32, 30)
+    hot, ok, low = {"level_dbfs": -5, "clip_pct": 2.0}, {"level_dbfs": -20, "clip_pct": 0}, {"level_dbfs": -40, "clip_pct": 0}
+    new, why = a.update(0.0, hot, g)
+    assert new is not None and new.total_db < g.total_db and "clipping" in why    # too hot: at once
+    assert a.update(0.5, hot, new)[0] is None                           # at most one step per second
+    assert all(a.update(t, ok, new)[0] is None for t in (2, 3, 4))      # in the window: leave it alone
+    assert a.update(5, low, new)[0] is None and a.update(6, low, new)[0] is None   # low, but not for 2 s yet
+    assert a.update(9, low, new)[0] is None                             # low for 4 s, but 10 s since stepping down
+    assert a.update(11, low, new)[0] is not None                        # now it may step up
+
+
+def test_agc_on_the_simulated_radio(tmp_path):
+    import time
+    from tayf.session.manager import SessionManager
+    from tayf.store.db import Store
+    m = SessionManager(Store(tmp_path / "t.db"), tmp_path / "rec")
+    try:
+        m.open_live("sim", center_hz=101.3e6, sample_rate_hz=2e6, lna_db=40, vga_db=62)   # far too hot
+        m.control({"agc": True})
+        t_end = time.time() + 15
+        while time.time() < t_end and (m.health.get("clip_pct", 100) > 0.05 or m.status()["agc"]["changes"] == 0):
+            m.next_frame()
+            time.sleep(0.05)
+        st = m.status()
+        assert st["agc"]["changes"] >= 1 and m.health["clip_pct"] <= 0.05
+        assert st["gains"]["total_db"] < 102
+        m.control({"vga_db": 20})                                        # a manual change turns it off
+        assert m.status()["agc"]["on"] is False
+    finally:
+        m.close()

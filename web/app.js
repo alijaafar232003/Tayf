@@ -521,6 +521,8 @@ function setStatus(st) {
     $("sel-lna").value = String(st.gains.lna_db);
     $("rng-vga").value = st.gains.vga_db; $("vga-val").textContent = st.gains.vga_db;
     $("chk-offset").checked = st.offset_tuning;
+    $("chk-agc").checked = st.agc.on;
+    $("agc-info").textContent = st.agc.on ? (st.agc.changes ? `${st.agc.changes} change${st.agc.changes > 1 ? "s" : ""}, last: ${st.agc.last}` : "watching the level") : "";
     $("sel-antenna").value = st.antenna_id || "";
     $("ro-tuned").textContent = fmtHz(st.tuned_hz, 4);
     $("ro-lo").textContent = st.offset_hz ? `${fmtHz(st.center_freq_hz, 4)} (offset +${fmtHz(st.offset_hz, 0)})` : fmtHz(st.center_freq_hz, 4);
@@ -652,6 +654,7 @@ $("sel-lna").onchange = (e) => control({ lna_db: parseInt(e.target.value) });
 $("rng-vga").oninput = (e) => { $("vga-val").textContent = e.target.value; };
 $("rng-vga").onchange = (e) => control({ vga_db: parseInt(e.target.value) });
 $("chk-offset").onchange = (e) => control({ offset_tuning: e.target.checked });
+$("chk-agc").onchange = (e) => control({ agc: e.target.checked });
 $("sel-antenna").onchange = (e) => control({ antenna_id: e.target.value });
 
 // Mouse on the spectrum or waterfall (they share one view, so both behave the same):
