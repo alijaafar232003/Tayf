@@ -13,7 +13,8 @@ from pathlib import Path
 import numpy as np
 
 from ..core.models import IQBlock, SpectrumFrame, SweepFrame, utc_now
-from ..core.sigmf_io import SigMFRecording
+from ..core.models import ReceiverSettings
+from ..core.sigmf_io import SigMFRecording, write_recording
 from ..dsp.dc import remove_dc
 from ..dsp.detect import DetectorConfig, detect, shape_for
 from ..dsp.inspect import inspect as inspect_signal
@@ -28,6 +29,7 @@ from ..sources.radio import LNA_STEPS, SAMPLE_RATES, VGA_STEPS, Gains, HackRFRad
 from ..sources.recording import RecordingSource
 from ..sources.sweep import HackRFSweep, SimSweep, SweepSource, check_range
 from ..store.db import Store
+from ..store.history import origin_of
 
 MAX_SAMPLES_PER_FRAME = 262_144     # caps CPU per frame at high sample rates
 NFFT_CHOICES = (256, 512, 1024, 2048, 4096, 8192, 16384)
@@ -62,11 +64,13 @@ class SessionManager:
         self.checking = False                   # a Receiver Check is changing the gains
         self.agc: AGC | None = None             # automatic gain control (live), None = off
         self.profile_dir = self.recordings_dir.parent / "receiver"
+        self.obs_dir = self.recordings_dir.parent / "observations"   # I/Q of inspected signals
         # Detection (Phase 3): detector + tracker run on every displayed frame
         self.detect_on = True
         self.det_cfg = DetectorConfig()
         self.tracker = Tracker()
-        self.closed_tracks: list[dict] = []     # summaries of finished tracks (saved to history in step 4)
+        self.closed_tracks: list[dict] = []     # summaries of finished tracks (also saved to the database)
+        self._seen_cache: dict[int, dict] = {}  # track id -> seen before? (history, for the Signals table)
         self.boxes: list[dict] = []             # the latest frame's detections, with track IDs
         self.det_rev = 0                        # bumps when boxes/tracks change
         self._det_cost_s = 0.0
@@ -143,19 +147,20 @@ class SessionManager:
                     self.stop_recording()
                 self.active.source.close()
                 self.store.end_session(self.active.id)
+                self._end_tracks(self.active)
                 self.active = None
                 self.health = {}
                 self.agc = None
-                self._end_tracks()
                 self._changed()
 
     def _changed(self) -> None:
         self.rev += 1
 
     # --- detection + tracking ---------------------------------------------
-    def _end_tracks(self) -> None:
+    def _end_tracks(self, a: ActiveSession) -> None:
         self.tracker.close_all()
-        self.closed_tracks = (self.closed_tracks + self.tracker.take_closed())[-500:]
+        self._save_closed(a)
+        self._seen_cache = {}
         self.boxes, self._shape_cache = [], {}
         self._profile = None                    # reloaded on next use (it may have been re-measured)
         self.det_rev += 1
@@ -184,7 +189,7 @@ class SessionManager:
         if track:
             span = (float(frame.freqs_hz[0]), float(frame.freqs_hz[-1]))
             pairs = self.tracker.update(dets, frame.time.timestamp(), span)
-            self.closed_tracks = (self.closed_tracks + self.tracker.take_closed())[-500:]
+            self._save_closed(a)
         else:
             pairs = [(d, None) for d in dets]
         confirmed = {tr["id"] for tr in self.tracker.table()}
@@ -194,9 +199,26 @@ class SessionManager:
         self._det_cost_s = time.perf_counter() - t0
         self._det_last_t = now
 
+    def _origin(self, a: ActiveSession) -> str:
+        return origin_of(a.source.settings.hardware)
+
+    def _save_closed(self, a: ActiveSession) -> None:
+        """Closed tracks -> light summaries in the database (D7), for history."""
+        closed = self.tracker.take_closed()
+        if closed:
+            self.closed_tracks = (self.closed_tracks + closed)[-500:]
+            self.store.add_candidate_summaries(a.id, self._origin(a), closed, a.recording_id)
+
+    def _seen(self, a: ActiveSession, tr: dict) -> dict:
+        """Seen in an earlier session? Looked up once per track (cached)."""
+        if tr["id"] not in self._seen_cache:
+            self._seen_cache[tr["id"]] = self.store.seen_before(
+                tr["f_center_hz"], max(tr["bandwidth_hz"], tr["max_bandwidth_hz"]), self._origin(a), a.id)
+        return self._seen_cache[tr["id"]]
+
     # --- Signal Inspector ---------------------------------------------------
     def inspect(self, track_id: int | None = None, f_hz: float | None = None, bw_hz: float | None = None,
-                seconds: float = 1.0) -> dict:
+                seconds: float = 1.0, save: bool = True) -> dict:
         """Take I/Q around a signal (live: `seconds` of fresh reception; recordings: at
         the play position) and measure it (tayf.dsp.inspect). Runs without holding the
         session lock during the capture, so the display keeps going."""
@@ -228,17 +250,47 @@ class SessionManager:
         if abs(off) + bw_hz / 2 > 0.9 * half:
             raise RuntimeError(f"{f_hz / 1e6:.4f} MHz is outside (or at the edge of) the current span: tune to it first")
         x = remove_dc(block.samples)
-        r = inspect_signal(x, block.sample_rate_hz, off, bw_hz, f_tuned_hz=block.center_freq_hz).to_dict()
+        ins = inspect_signal(x, block.sample_rate_hz, off, bw_hz, f_tuned_hz=block.center_freq_hz)
+        r = ins.to_dict()
         r.update({"track_id": track_id, "requested_hz": f_hz, "mode": mode, "time": block.start_time.isoformat(),
                   "settings": settings.to_dict(), "track": track})
+        if save:
+            r.update(self._save_observation(a, r, ins, block.start_time))
         with self._lock:
             self.last_inspection = r
         return r
 
+    def _save_observation(self, a: ActiveSession, r: dict, ins, start_time) -> dict:
+        """Save an inspection (D7: the full observation plus its I/Q) and match it to
+        history. The I/Q saved is the signal's narrow channel (complex float32, centred
+        on the requested frequency), small enough to keep and what the classifier will use."""
+        m = {k: v for k, v in r.items() if k not in ("views", "track", "settings")}
+        settings = r["settings"]
+        health = self.health if a.mode == "live" else None
+        oid, hist = self.store.save_observation(a.id, self._origin(a), m, settings, health)
+        s = ReceiverSettings(**{**settings, "center_freq_hz": ins.channel_center_hz,
+                                "sample_rate_hz": ins.fs_channel_hz})
+        base = self.obs_dir / f"obs_{oid:05d}_{ins.channel_center_hz / 1e3:.0f}kHz"
+        meta = write_recording(base, ins.channel, s, "cf32_le", start_time,
+                               f"Tayf observation #{oid}: {ins.f_center_hz / 1e6:.4f} MHz, "
+                               f"OBW {ins.obw_hz / 1e3:.1f} kHz, SNR {ins.snr_db:.1f} dB ({a.mode})")
+        self.store.set_observation_iq(oid, str(meta.resolve()))
+        return {"observation_id": oid, "iq_path": str(meta), "history": hist}
+
+    def history(self, f_hz: float, bw_hz: float) -> dict:
+        """What is known about a signal (without inspecting it)."""
+        with self._lock:
+            a = self._require()
+            origin = self._origin(a)
+        return self.store.history_for(f_hz, bw_hz, origin)
+
     def detections(self) -> dict:
         """What the dashboard draws: this frame's boxes and the candidate table."""
         with self._lock:
-            return {"type": "det", "on": self.detect_on, "boxes": self.boxes, "tracks": self.tracker.table()[:100],
+            tracks = self.tracker.table()[:100]
+            if self.active:
+                tracks = [{**t, "seen": self._seen(self.active, t)} for t in tracks]
+            return {"type": "det", "on": self.detect_on, "boxes": self.boxes, "tracks": tracks,
                     "closed": len(self.closed_tracks), "cost_ms": round(1000 * self._det_cost_s, 1)}
 
     # --- recording from live --------------------------------------------

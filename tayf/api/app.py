@@ -86,6 +86,7 @@ class InspectIn(BaseModel):
     f_hz: float | None = None           # a frequency (and width) to look at
     bw_hz: float | None = None
     seconds: float = 1.0                # live: how long to capture
+    save: bool = True                   # save the observation + its I/Q and match it to history
 
 
 class RecordIn(BaseModel):
@@ -299,11 +300,19 @@ def create_app(data_dir: str | Path = "data") -> FastAPI:
     @app.post("/api/session/inspect")
     def inspect(body: InspectIn):
         try:
-            return manager.inspect(body.track, body.f_hz, body.bw_hz, body.seconds)
+            return manager.inspect(body.track, body.f_hz, body.bw_hz, body.seconds, body.save)
         except KeyError as e:
             raise HTTPException(404, str(e).strip("'"))
         except ValueError as e:
             raise HTTPException(400, str(e))
+        except RuntimeError as e:
+            raise HTTPException(409, str(e))
+
+    @app.get("/api/history")
+    def history(f_hz: float, bw_hz: float = 10e3):
+        """Earlier observations and detector sightings of the signal at f_hz."""
+        try:
+            return manager.history(f_hz, bw_hz)
         except RuntimeError as e:
             raise HTTPException(409, str(e))
 

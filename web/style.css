@@ -127,6 +127,14 @@ button:disabled { opacity: 0.45; cursor: default; }
 .insp-metrics div { display: flex; flex-direction: column; }
 .insp-metrics span { color: var(--muted); font-size: 11px; }
 .insp-metrics b { font-variant-numeric: tabular-nums; font-weight: 600; }
+.insp-history { margin: 8px 0 4px; font-size: 13px; }
+.insp-history h3 { font-size: 13px; margin: 0 0 4px; display: flex; gap: 8px; align-items: center; }
+.insp-history table { font-size: 12px; }
+.badge { font-size: 11px; padding: 1px 7px; border-radius: 9px; border: 1px solid var(--border); font-weight: 600; }
+.badge.new { color: var(--accent); border-color: var(--accent); }
+.badge.known { color: #7fd17f; border-color: #7fd17f; }
+.badge.changed { color: var(--warn); border-color: var(--warn); }
+.hist-new { color: var(--accent); }
 .insp-views { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 10px; margin-top: 8px; }
 .insp-views canvas { width: 100%; height: 170px; display: block; background: #0b0e12; border: 1px solid var(--border); border-radius: 4px; }
 .insp-views .vt { font-size: 12px; color: var(--muted); margin-bottom: 2px; display: inline-block; }

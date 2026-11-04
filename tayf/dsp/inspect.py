@@ -316,10 +316,13 @@ def inspect(x: np.ndarray, fs: float, offset_hz: float, width_hz: float, f_tuned
         "inst_freq": {"t_ms": _thin(t[:-1] * 1e3).round(3).tolist(), "hz": _thin(inst).round(1).tolist()},
         "constellation": None if const is None else {"i": _thin(const.real).round(3).tolist(), "q": _thin(const.imag).round(3).tolist()},
     }
-    return Inspection(f_center_hz=float(f_tuned_hz + offset_hz + centre), offset_hz=float(centre),
+    r = Inspection(f_center_hz=float(f_tuned_hz + offset_hz + centre), offset_hz=float(centre),
                       obw_hz=round(obw, 1), bw26_hz=round(bw26, 1),
                       power_dbfs=round(float(10 * np.log10(sig_power + 1e-30)), 1),
                       noise_dbfs_hz=round(float(10 * np.log10(noise)), 1), snr_db=round(float(snr), 1),
                       fs_channel_hz=fsc, duration_s=round(len(y) / fsc, 3), bursts=bursts, fsk_levels_hz=levels,
                       symbol_rate_hz=None if rs is None else round(rs, 1), constellation_order=order,
                       notes=notes, views=views)
+    # The channel I/Q (centred on the requested frequency) is kept for saving, not in to_dict
+    r.channel, r.channel_center_hz = y, f_tuned_hz + offset_hz
+    return r

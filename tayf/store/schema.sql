@@ -52,7 +52,10 @@ CREATE TABLE IF NOT EXISTS candidate_summaries (
     last_seen      TEXT NOT NULL,
     duty_cycle     REAL,
     peak_snr_db    REAL,
-    mean_snr_db    REAL
+    mean_snr_db    REAL,
+    max_bandwidth_hz REAL,
+    recording_id   INTEGER,            -- replays of one recording count as one sighting
+    origin         TEXT                -- 'real' or 'sim' (never matched with each other)
 );
 
 -- Phase 3-4: an investigated, measured (and later classified) signal.
@@ -65,7 +68,8 @@ CREATE TABLE IF NOT EXISTS signal_profiles (
     last_seen         TEXT NOT NULL,
     n_observations    INTEGER NOT NULL DEFAULT 0,
     typical_snr_db    REAL,
-    notes             TEXT
+    notes             TEXT,
+    origin            TEXT
 );
 
 CREATE TABLE IF NOT EXISTS observations (
@@ -86,7 +90,9 @@ CREATE TABLE IF NOT EXISTS observations (
     antenna_id        TEXT REFERENCES antennas(id),
     settings_json     TEXT NOT NULL,
     health_json       TEXT,              -- clipping %, dropped samples at capture time
-    iq_meta_path      TEXT               -- SigMF snippet, when saved
+    iq_meta_path      TEXT,              -- SigMF snippet, when saved
+    origin            TEXT,
+    measurements_json TEXT               -- the full Signal Inspector result (without the plots)
 );
 
 -- Later: occupancy per band and hour.
@@ -101,3 +107,4 @@ CREATE TABLE IF NOT EXISTS occupancy (
 
 CREATE INDEX IF NOT EXISTS idx_obs_freq ON observations(center_freq_hz);
 CREATE INDEX IF NOT EXISTS idx_profile_freq ON signal_profiles(center_freq_hz);
+CREATE INDEX IF NOT EXISTS idx_cand_freq ON candidate_summaries(center_freq_hz);

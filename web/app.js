@@ -944,6 +944,9 @@ $("live-form").onsubmit = async (e) => {
 // Confirmed tracks from the server; refreshed at most 4 times a second so it stays readable.
 let candDrawn = 0;
 const fmtTime = (t) => new Date(t * 1000).toLocaleTimeString([], { hour12: false });
+const fmtDate = (iso) => new Date(iso).toLocaleString([], { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", hour12: false });
+const fmtSeen = (s) => !s ? "" : !s.first_seen ? '<span class="hist-new">new</span>'
+  : `since ${new Date(s.first_seen).toLocaleDateString([], { day: "numeric", month: "short" })} · ${s.sessions} session${s.sessions === 1 ? "" : "s"}`;
 function showCandidates(force = false) {
   const now = performance.now();
   if (!force && now - candDrawn < 250) return;
@@ -957,6 +960,7 @@ function showCandidates(force = false) {
       <td><span class="dot"></span>${t.id}</td><td>${fmtHz(t.f_center_hz, 4)}</td><td>${fmtHz(t.bandwidth_hz, 1)}</td>
       <td>${t.present ? t.snr_db.toFixed(1) : "–"} / ${t.max_snr_db.toFixed(1)} dB</td><td>${(100 * t.duty).toFixed(0)} %</td>
       <td>${fmtTime(t.first_seen)}</td><td>${t.present ? "now" : fmtTime(t.last_seen)}</td>
+      <td>${fmtSeen(t.seen)}</td>
       <td class="muted">${t.spur ? "HackRF spur" : ""}</td>
       <td>${S.status?.mode === "scan" ? "" : `<button class="small-btn" data-inspect="${t.id}">Inspect</button>`}</td></tr>`).join("");
 }
@@ -1088,6 +1092,7 @@ function showInspection(r) {
   if (r.constellation_order) m.push(["Phase states (hint)", r.constellation_order === 4 ? "4 (QPSK-like)" : "2 (BPSK-like)", "Which M-th power gives the sharpest line. A hint only; the classifier (Phase 4) decides."]);
   $("insp-metrics").innerHTML = m.map(([k, v, tip]) => `<div data-tip="${esc(tip)}"><span>${k}</span><b>${esc(v)}</b></div>`).join("");
   $("insp-notes").textContent = r.notes.join(" ");
+  showHistory(r);
   const v = r.views, fc = r.f_center_hz;
   smallPlot($("iv-spec"), v.spectrum.f_hz, [{ y: v.spectrum.db }], { hlines: [v.spectrum.noise_db], xfmt: (x) => ((x - fc) / 1e3).toFixed(0) + "k",
     shade: [fc - r.obw_hz / 2, fc + r.obw_hz / 2], label: "dBFS/Hz vs offset" });
@@ -1096,6 +1101,34 @@ function showInspection(r) {
   smallPlot($("iv-iq"), v.iq.t_ms, [{ y: v.iq.i }, { y: v.iq.q, color: "#4fb3ff" }], { xfmt: (x) => x.toFixed(2) + " ms", yfmt: (y) => y.toFixed(3) });
   smallPlot($("iv-if"), v.inst_freq.t_ms, [{ y: v.inst_freq.hz }], { xfmt: fmtMs, yfmt: (y) => fmtHz(y, 0).replace(" ", ""), label: "Hz from centre" });
   smallScatter($("iv-const"), v.constellation?.i, v.constellation?.q, r.notes.find((n) => n.includes("constellation")) || "No constellation.");
+}
+// History panel: earlier observations of the same signal (matched by frequency and width)
+function showHistory(r) {
+  const h = r.history, el = $("insp-history");
+  if (!h) { el.innerHTML = ""; return; }
+  const p = h.profile, d = h.detector;
+  const label = { new: "New: never inspected before", known: "Known signal", changed: "Changed since last time" }[h.status];
+  const tip = { new: "No earlier observation matches this frequency and width. A signal profile was started.",
+    known: "Matches an earlier observation and nothing important changed (bandwidth within ±25 %, same burst pattern).",
+    changed: "Matches an earlier observation, but something differs (listed)." }[h.status];
+  const facts = [
+    `first seen ${fmtDate(h.first_seen)}`,
+    `inspected ${p.n_observations}×`,
+    d.sessions ? `found by the detector in ${d.sessions} session${d.sessions === 1 ? "" : "s"} (last ${fmtDate(d.last_seen)})` : "not yet in any finished detector track",
+  ];
+  const act = (o) => o.continuous == null ? "" : o.continuous ? "continuous" : `bursts${o.period_ms ? ", every " + fmtMs(o.period_ms) : ""}`;
+  const setup = (o) => { const s = o.settings || {}; return `${s.antenna_id || "?"} · LNA ${s.lna_gain_db ?? "?"} / VGA ${s.vga_gain_db ?? "?"}${s.amp_on ? " · amp" : ""}`; };
+  const rows = [{ ...h.now, id: r.observation_id, status: h.status, isNow: true }, ...h.previous].map((o) => `
+    <tr${o.isNow ? ' class="sel"' : ""}><td>${o.isNow ? "now" : "#" + o.id}</td><td>${fmtDate(o.time)}</td><td>${fmtHz(o.f_center_hz, 5)}</td>
+      <td>${fmtHz(o.obw_hz, 1)}</td><td>${o.snr_db.toFixed(1)} dB</td><td>${o.power_dbfs.toFixed(1)} dBFS</td><td>${act(o)}</td>
+      <td class="muted">${esc(setup(o))}</td></tr>`).join("");
+  el.innerHTML = `<h3>History <span class="badge ${h.status}" data-tip="${esc(tip)}">${label}</span>
+      <span class="muted small">${facts.join(" · ")}</span></h3>
+    ${h.changes.length ? `<div class="warn small">${h.changes.map(esc).join("; ")}</div>` : ""}
+    <table class="list"><thead><tr><th></th><th>Time</th><th>Centre</th><th data-tip="99 % occupied bandwidth.">OBW</th><th>SNR</th>
+      <th data-tip="Only comparable between rows with the same antenna and gains (dBm needs calibration).">Power</th><th>Activity</th><th>Antenna · gains</th></tr></thead>
+      <tbody>${rows}</tbody></table>
+    <div class="muted small">Saved as observation #${r.observation_id} with its I/Q (${fmtHz(r.fs_channel_hz, 1)} channel): ${esc(r.iq_path)}</div>`;
 }
 async function runInspect(body) {
   S.inspectReq = body;

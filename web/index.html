@@ -229,6 +229,7 @@
       <div id="insp-msg" class="muted small"></div>
       <div id="insp-metrics" class="insp-metrics"></div>
       <div id="insp-notes" class="muted small"></div>
+      <div id="insp-history" class="insp-history"></div>
       <div class="insp-views">
         <div><div class="vt" data-tip="Spectrum of the channel cut out around the signal (dBFS/Hz). Dashed: the noise level; shaded: the 99 % occupied bandwidth.">Spectrum</div><canvas id="iv-spec"></canvas></div>
         <div><div class="vt" data-tip="How the signal's spectrum changes over the capture (time down, frequency across).">Spectrogram</div><canvas id="iv-sgram"></canvas></div>
@@ -248,6 +249,7 @@
           <th data-tip="How far the strongest bin stands over the local floor: now / highest seen.">SNR now / max</th>
           <th data-tip="Share of the frames (with this frequency in view) in which it was detected. 100 % = always on; low = bursts.">On</th>
           <th data-tip="When it was first and last detected (recordings: time in the recording).">First seen</th><th>Last seen</th>
+          <th data-tip="Seen in an earlier session? 'new' = never before (by the detector or an inspection); otherwise the first date it was ever seen and in how many earlier sessions. Matched by frequency and width; simulated and real data are kept apart.">History</th>
           <th></th><th></th></tr></thead>
         <tbody></tbody>
       </table>
