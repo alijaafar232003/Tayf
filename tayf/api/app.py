@@ -81,6 +81,13 @@ class ScanIn(BaseModel):
     preset_id: str | None = None
 
 
+class InspectIn(BaseModel):
+    track: int | None = None            # a track from the Signals table, or:
+    f_hz: float | None = None           # a frequency (and width) to look at
+    bw_hz: float | None = None
+    seconds: float = 1.0                # live: how long to capture
+
+
 class RecordIn(BaseModel):
     on: bool
 
@@ -288,6 +295,17 @@ def create_app(data_dir: str | Path = "data") -> FastAPI:
         except ValueError as e:
             raise HTTPException(400, str(e))
         return manager.status()
+
+    @app.post("/api/session/inspect")
+    def inspect(body: InspectIn):
+        try:
+            return manager.inspect(body.track, body.f_hz, body.bw_hz, body.seconds)
+        except KeyError as e:
+            raise HTTPException(404, str(e).strip("'"))
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        except RuntimeError as e:
+            raise HTTPException(409, str(e))
 
     @app.get("/api/session/detections")
     def detections():

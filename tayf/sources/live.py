@@ -169,6 +169,42 @@ class LiveSource:
         return IQBlock(to_complex(raw, "ci8"), fs, lo,
                        utc_now() - timedelta(seconds=n / fs), total - n)
 
+    def _copy(self, a: int, b: int) -> np.ndarray:
+        """Raw samples a..b (absolute stream indices) from the ring buffer; caller holds the lock."""
+        s, e = (a % self._size) * 2, (b % self._size) * 2
+        return self._buf[s:e].copy() if s < e else np.concatenate([self._buf[s:], self._buf[:e]])
+
+    def capture(self, seconds: float, timeout_s: float | None = None) -> IQBlock:
+        """Collect `seconds` of fresh samples, longer than the ring buffer if needed:
+        new samples are copied out as they arrive. A setting change (retune, gain)
+        meanwhile restarts the capture, so it is all at one setting."""
+        fs = self.sample_rate_hz
+        n_want = int(seconds * fs)
+        t_end = time.time() + (timeout_s or seconds * 3 + 2)
+        parts, got, pos, start_time, valid = [], 0, None, None, None
+        while got < n_want:
+            if time.time() > t_end:
+                raise RuntimeError("Timed out collecting samples")
+            time.sleep(0.05)
+            with self._lock:
+                if self.sample_rate_hz != fs:
+                    raise RuntimeError("The sample rate changed during the capture")
+                if pos is None or self._valid_from != valid:          # (re)start after a setting change
+                    valid = self._valid_from
+                    pos = max(self._total, valid)
+                    parts, got, start_time = [], 0, utc_now()
+                    lo = self.lo_hz
+                    continue
+                end = min(self._total, pos + n_want - got)
+                if end - pos > self._size:
+                    raise RuntimeError("The capture fell behind the radio")
+                if end > pos:
+                    parts.append(self._copy(pos, end))
+                    got += end - pos
+                    pos = end
+        raw = np.concatenate(parts)
+        return IQBlock(to_complex(raw, "ci8"), fs, lo, start_time, pos - got)
+
     def read_block(self, n_samples: int) -> IQBlock | None:
         return self.latest(n_samples)
 

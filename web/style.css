@@ -116,6 +116,20 @@ label[data-tip], button[data-tip], label[data-tip] select, label[data-tip] input
 .readout [data-tip] { border-bottom: 1px dotted var(--border); }
 button.small-btn { padding: 2px 8px; font-size: 12px; }
 button:disabled { opacity: 0.45; cursor: default; }
+/* Signal Inspector */
+.inspector { margin-top: 8px; }
+.inspector.hidden { display: none; }
+.insp-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.insp-head h2 { margin: 0; }
+.insp-head .spacer { flex: 1; }
+.insp-head label { color: var(--muted); font-size: 12px; display: flex; gap: 4px; align-items: center; }
+.insp-metrics { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 6px 16px; margin: 10px 0 6px; font-size: 13px; }
+.insp-metrics div { display: flex; flex-direction: column; }
+.insp-metrics span { color: var(--muted); font-size: 11px; }
+.insp-metrics b { font-variant-numeric: tabular-nums; font-weight: 600; }
+.insp-views { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 10px; margin-top: 8px; }
+.insp-views canvas { width: 100%; height: 170px; display: block; background: #0b0e12; border: 1px solid var(--border); border-radius: 4px; }
+.insp-views .vt { font-size: 12px; color: var(--muted); margin-bottom: 2px; display: inline-block; }
 :root { --spur: rgba(229, 72, 77, 0.85); --det: rgba(255, 170, 60, 0.95); --det-fill: rgba(255, 170, 60, 0.13); }
 .candidates { margin-top: 8px; }
 .candidates h2 { font-size: 15px; }

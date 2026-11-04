@@ -854,7 +854,7 @@ $("chk-bands").onchange = $("chk-spurs").onchange = scheduleDraw;
 function showView(name) {
   $("home").classList.toggle("hidden", name !== "home");
   $("analysis").classList.toggle("hidden", name !== "analysis");
-  if (name === "analysis") { S.auto.init = false; S.zoom = null; S.smooth = null; S.det = null; S.selTrack = null; resetWaterfall(); showZoom(); showCandidates(true); scheduleDraw(); }
+  if (name === "analysis") { S.auto.init = false; S.zoom = null; S.smooth = null; S.det = null; S.selTrack = null; $("inspector").classList.add("hidden"); resetWaterfall(); showZoom(); showCandidates(true); scheduleDraw(); }
 }
 async function openLive(body) {
   setStatus(await api("/api/session/live", { method: "POST", body }));
@@ -957,10 +957,13 @@ function showCandidates(force = false) {
       <td><span class="dot"></span>${t.id}</td><td>${fmtHz(t.f_center_hz, 4)}</td><td>${fmtHz(t.bandwidth_hz, 1)}</td>
       <td>${t.present ? t.snr_db.toFixed(1) : "–"} / ${t.max_snr_db.toFixed(1)} dB</td><td>${(100 * t.duty).toFixed(0)} %</td>
       <td>${fmtTime(t.first_seen)}</td><td>${t.present ? "now" : fmtTime(t.last_seen)}</td>
-      <td class="muted">${t.spur ? "HackRF spur" : ""}</td></tr>`).join("");
+      <td class="muted">${t.spur ? "HackRF spur" : ""}</td>
+      <td>${S.status?.mode === "scan" ? "" : `<button class="small-btn" data-inspect="${t.id}">Inspect</button>`}</td></tr>`).join("");
 }
 // Click a row: select the signal and zoom the view onto it (step 3 opens the Signal Inspector here).
 $("cand-table").onclick = (e) => {
+  const ins = e.target.dataset?.inspect;
+  if (ins) { S.selTrack = parseInt(ins); runInspect({ track: parseInt(ins) }); showCandidates(true); return; }
   const row = e.target.closest("tr[data-track]");
   if (!row || !S.frame) return;
   const t = (S.det?.tracks || []).find((x) => x.id === parseInt(row.dataset.track));
@@ -972,6 +975,147 @@ $("cand-table").onclick = (e) => {
   if (S.status?.mode === "scan") setSelection({ hz: t.f_center_hz });
   showZoom(); showCandidates(true); scheduleDraw();
 };
+
+// ---------- Signal Inspector ----------
+// Small canvas plots: lines (x, several y series), an image, a scatter.
+function smallPlot(cv, xs, series, opt = {}) {
+  fitCanvas(cv);
+  const ctx = cv.getContext("2d"), r = window.devicePixelRatio || 1;
+  const b = { x: 46 * r, y: 6 * r, w: cv.width - 52 * r, h: cv.height - 26 * r };
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  let lo = Infinity, hi = -Infinity;
+  for (const s of series) for (const v of s.y) if (isFinite(v)) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
+  for (const h of opt.hlines || []) { lo = Math.min(lo, h); hi = Math.max(hi, h); }
+  if (!(hi > lo)) { hi = lo + 1; lo -= 1; }
+  const pad = (hi - lo) * 0.05; lo -= pad; hi += pad;
+  const x0 = xs[0], x1 = xs[xs.length - 1] === x0 ? x0 + 1 : xs[xs.length - 1];
+  const X = (x) => b.x + b.w * (x - x0) / (x1 - x0), Y = (v) => b.y + b.h * (1 - (v - lo) / (hi - lo));
+  ctx.strokeStyle = "#262c35"; ctx.fillStyle = "#8b94a1"; ctx.font = `${10 * r}px system-ui`; ctx.lineWidth = 1;
+  for (let i = 0; i <= 4; i++) {
+    const v = lo + (hi - lo) * i / 4, y = Y(v);
+    ctx.beginPath(); ctx.moveTo(b.x, y); ctx.lineTo(b.x + b.w, y); ctx.stroke();
+    ctx.textAlign = "right"; ctx.fillText(opt.yfmt ? opt.yfmt(v) : v.toFixed(1), b.x - 4 * r, y + 3 * r);
+  }
+  for (let i = 0; i <= 4; i++) {
+    const v = x0 + (x1 - x0) * i / 4;
+    ctx.textAlign = i === 0 ? "left" : i === 4 ? "right" : "center";
+    ctx.fillText(opt.xfmt ? opt.xfmt(v) : v.toFixed(2), X(v), b.y + b.h + 13 * r);
+  }
+  if (opt.shade) { ctx.fillStyle = "rgba(255,170,60,0.15)"; ctx.fillRect(X(opt.shade[0]), b.y, X(opt.shade[1]) - X(opt.shade[0]), b.h); }
+  for (const h of opt.hlines || []) {
+    ctx.strokeStyle = "#ffc44d"; ctx.setLineDash([4 * r, 3 * r]);
+    ctx.beginPath(); ctx.moveTo(b.x, Y(h)); ctx.lineTo(b.x + b.w, Y(h)); ctx.stroke(); ctx.setLineDash([]);
+  }
+  ctx.save(); ctx.beginPath(); ctx.rect(b.x, b.y, b.w, b.h); ctx.clip();
+  for (const s of series) {
+    ctx.strokeStyle = s.color || "#7fe0a0"; ctx.lineWidth = 1 * r; ctx.beginPath();
+    s.y.forEach((v, i) => (i ? ctx.lineTo(X(xs[i]), Y(v)) : ctx.moveTo(X(xs[i]), Y(v))));
+    ctx.stroke();
+  }
+  ctx.restore();
+  if (opt.label) { ctx.fillStyle = "#8b94a1"; ctx.textAlign = "right"; ctx.fillText(opt.label, b.x + b.w, b.y + 10 * r); }
+}
+function smallImage(cv, rows, opt = {}) {
+  fitCanvas(cv);
+  const ctx = cv.getContext("2d"), r = window.devicePixelRatio || 1;
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  if (!rows.length) return;
+  const h = rows.length, w = rows[0].length, img = document.createElement("canvas");
+  img.width = w; img.height = h;
+  const c = img.getContext("2d"), d = c.createImageData(w, h);
+  const all = rows.flat().filter(isFinite).sort((a, b) => a - b);
+  const lo = all[Math.floor(all.length * 0.2)], hi = all[all.length - 1];
+  rows.forEach((row, y) => row.forEach((v, x) => {
+    const k = Math.max(0, Math.min(255, Math.round(255 * (v - lo) / (hi - lo)))), o = 4 * (y * w + x);
+    d.data[o] = LUT[3 * k]; d.data[o + 1] = LUT[3 * k + 1]; d.data[o + 2] = LUT[3 * k + 2]; d.data[o + 3] = 255;
+  }));
+  c.putImageData(d, 0, 0);
+  const b = { x: 46 * r, y: 6 * r, w: cv.width - 52 * r, h: cv.height - 26 * r };
+  ctx.imageSmoothingEnabled = false; ctx.drawImage(img, b.x, b.y, b.w, b.h);
+  ctx.fillStyle = "#8b94a1"; ctx.font = `${10 * r}px system-ui`;
+  ctx.textAlign = "left"; ctx.fillText(fmtHz(opt.flo, 4), b.x, b.y + b.h + 13 * r);
+  ctx.textAlign = "right"; ctx.fillText(fmtHz(opt.fhi, 4), b.x + b.w, b.y + b.h + 13 * r);
+  ctx.save(); ctx.translate(12 * r, b.y + b.h / 2); ctx.rotate(-Math.PI / 2); ctx.textAlign = "center";
+  ctx.fillText(`time ↓ ${opt.t.toFixed(2)} s`, 0, 0); ctx.restore();
+}
+function smallScatter(cv, xs, ys, note) {
+  fitCanvas(cv);
+  const ctx = cv.getContext("2d"), r = window.devicePixelRatio || 1;
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  ctx.fillStyle = "#8b94a1"; ctx.font = `${11 * r}px system-ui`;
+  if (!xs) {
+    ctx.textAlign = "center";
+    const lines = [];
+    let cur = "";
+    for (const w of note.split(" ")) { if ((cur + " " + w).length > 52) { lines.push(cur); cur = w; } else cur = cur ? cur + " " + w : w; }
+    lines.push(cur);
+    lines.forEach((l, i) => ctx.fillText(l, cv.width / 2, cv.height / 2 + (i - lines.length / 2 + 0.5) * 15 * r));
+    return;
+  }
+  const s = Math.min(cv.width, cv.height) / 2 - 8 * r, cx = cv.width / 2, cy = cv.height / 2, k = s / 1.6;
+  ctx.strokeStyle = "#262c35"; ctx.beginPath(); ctx.moveTo(cx - s, cy); ctx.lineTo(cx + s, cy); ctx.moveTo(cx, cy - s); ctx.lineTo(cx, cy + s); ctx.stroke();
+  ctx.fillStyle = "rgba(127,224,160,0.6)";
+  for (let i = 0; i < xs.length; i++) ctx.fillRect(cx + xs[i] * k - r, cy - ys[i] * k - r, 2 * r, 2 * r);
+}
+const fmtMs = (v) => v >= 1000 ? (v / 1000).toFixed(2) + " s" : v.toFixed(v < 10 ? 2 : 1) + " ms";
+function showInspection(r) {
+  S.inspection = r;
+  $("inspector").classList.remove("hidden");
+  const b = r.bursts;
+  $("insp-title").textContent = `Signal Inspector · ${r.track_id ? "#" + r.track_id + " · " : ""}${fmtHz(r.f_center_hz, 4)}`;
+  $("insp-msg").textContent = `${r.mode === "live" ? "Captured live" : "From the recording"} at ${new Date(r.time).toLocaleTimeString([], { hour12: false })}: ` +
+    `${r.duration_s} s, channel ${fmtHz(r.fs_channel_hz, 1)} wide.`;
+  const m = [
+    ["Centre frequency", fmtHz(r.f_center_hz, 5), "Power-weighted centre of the signal's spectrum."],
+    ["Offset", `${r.offset_hz >= 0 ? "+" : ""}${fmtHz(r.offset_hz, 2)}`, "Centre minus the frequency the detector reported."],
+    ["Occupied bandwidth (99 %)", fmtHz(r.obw_hz, 1), "Width holding 99 % of the signal's power (ITU definition)."],
+    ["−26 dB bandwidth", fmtHz(r.bw26_hz, 1), "Width where the spectrum is within 26 dB of its peak (emission bandwidth)."],
+    ["Power", `${r.power_dbfs.toFixed(1)} dBFS`, "Signal power in the channel, noise removed. dBFS is relative to the ADC's full scale (dBm needs calibration)."],
+    ["SNR", `${r.snr_db.toFixed(1)} dB`, "Signal power over the noise in its occupied bandwidth."],
+    ["Noise density", `${r.noise_dbfs_hz.toFixed(1)} dBFS/Hz`, "Noise around the signal, per Hz."],
+    ["Activity", b.continuous ? "continuous" : `${b.count} burst${b.count === 1 ? "" : "s"}, ${(100 * b.duty).toFixed(0)} % on`, "Continuous, or bursts found on the envelope."],
+  ];
+  if (!b.continuous) {
+    if (b.length_ms.median != null) m.push(["Burst length", `${fmtMs(b.length_ms.median)} (${fmtMs(b.length_ms.min)} – ${fmtMs(b.length_ms.max)})`, "Median (min – max) of complete bursts, edges at half power."]);
+    if (b.gap_ms.median != null) m.push(["Gap", `${fmtMs(b.gap_ms.median)} (${fmtMs(b.gap_ms.min)} – ${fmtMs(b.gap_ms.max)})`, "Median (min – max) of the silences between bursts."]);
+    if (b.period_ms != null) m.push(["Repeat period", fmtMs(b.period_ms), "Median time from one burst's start to the next."]);
+    if (b.on_power_dbfs != null) m.push(["Power while on", `${b.on_power_dbfs.toFixed(1)} dBFS`, "Power during the bursts; the Power above averages over the gaps too."]);
+    if (b.packets > 1) m.push(["Packets", `${b.packets}` + (b.packet_ms.median != null ? `, ${fmtMs(b.packet_ms.max)} long` : "") +
+      (b.packet_period_ms ? `, every ${fmtMs(b.packet_period_ms)}` : ""), "Groups of bursts separated by long silences (e.g. a key fob's data frames). Length: the longest complete one."]);
+  }
+  if (r.fsk_levels_hz.length > 1) m.push(["Frequency levels", r.fsk_levels_hz.map((v) => `${v >= 0 ? "+" : ""}${fmtHz(v, 1)}`).join(", "), "Clusters of the instantaneous frequency while on: 2 or more suggest FSK."]);
+  m.push(["Symbol rate", r.symbol_rate_hz ? fmtHz(r.symbol_rate_hz, 2).replace("Hz", "Bd") : "none found", "From the spectral line of |x|² (linear digital modulations only)."]);
+  if (r.constellation_order) m.push(["Phase states (hint)", r.constellation_order === 4 ? "4 (QPSK-like)" : "2 (BPSK-like)", "Which M-th power gives the sharpest line. A hint only; the classifier (Phase 4) decides."]);
+  $("insp-metrics").innerHTML = m.map(([k, v, tip]) => `<div data-tip="${esc(tip)}"><span>${k}</span><b>${esc(v)}</b></div>`).join("");
+  $("insp-notes").textContent = r.notes.join(" ");
+  const v = r.views, fc = r.f_center_hz;
+  smallPlot($("iv-spec"), v.spectrum.f_hz, [{ y: v.spectrum.db }], { hlines: [v.spectrum.noise_db], xfmt: (x) => ((x - fc) / 1e3).toFixed(0) + "k",
+    shade: [fc - r.obw_hz / 2, fc + r.obw_hz / 2], label: "dBFS/Hz vs offset" });
+  smallImage($("iv-sgram"), v.spectrogram.db, { flo: v.spectrogram.f_lo_hz, fhi: v.spectrogram.f_hi_hz, t: v.spectrogram.t_s });
+  smallPlot($("iv-env"), v.envelope.t_ms, [{ y: v.envelope.db }], { hlines: [v.envelope.on_db], xfmt: fmtMs, label: "dBFS" });
+  smallPlot($("iv-iq"), v.iq.t_ms, [{ y: v.iq.i }, { y: v.iq.q, color: "#4fb3ff" }], { xfmt: (x) => x.toFixed(2) + " ms", yfmt: (y) => y.toFixed(3) });
+  smallPlot($("iv-if"), v.inst_freq.t_ms, [{ y: v.inst_freq.hz }], { xfmt: fmtMs, yfmt: (y) => fmtHz(y, 0).replace(" ", ""), label: "Hz from centre" });
+  smallScatter($("iv-const"), v.constellation?.i, v.constellation?.q, r.notes.find((n) => n.includes("constellation")) || "No constellation.");
+}
+async function runInspect(body) {
+  S.inspectReq = body;
+  $("inspector").classList.remove("hidden");
+  $("insp-msg").textContent = S.status?.mode === "live" ? `Capturing ${$("insp-secs").value} s of I/Q…` : "Reading I/Q from the recording…";
+  $("insp-again").disabled = true;
+  try { showInspection(await api("/api/session/inspect", { method: "POST", body: { ...body, seconds: parseFloat($("insp-secs").value) } })); }
+  catch (e) {
+    $("insp-msg").innerHTML = `<span class="warn">${esc(e.message)}</span>`;
+    // At the edge of the span: offer to tune there (live) and inspect again once the radio has settled
+    const t = body.track && (S.det?.tracks || []).find((x) => x.id === body.track);
+    if (S.status?.mode === "live" && t && e.message.includes("tune to it first")) {
+      $("insp-msg").insertAdjacentHTML("beforeend", ' <button id="insp-tune" class="small-btn">Tune there and inspect</button>');
+      $("insp-tune").onclick = async () => { tuneTo(t.f_center_hz); await new Promise((r) => setTimeout(r, 600)); runInspect(body); };
+    }
+  }
+  finally { $("insp-again").disabled = false; }
+}
+$("insp-again").onclick = () => S.inspectReq && runInspect(S.inspectReq);
+$("insp-close").onclick = () => $("inspector").classList.add("hidden");
 
 // ---------- Receiver Check ----------
 $("btn-check").onclick = async () => {

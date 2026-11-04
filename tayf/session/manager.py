@@ -16,6 +16,7 @@ from ..core.models import IQBlock, SpectrumFrame, SweepFrame, utc_now
 from ..core.sigmf_io import SigMFRecording
 from ..dsp.dc import remove_dc
 from ..dsp.detect import DetectorConfig, detect, shape_for
+from ..dsp.inspect import inspect as inspect_signal
 from ..dsp.track import Tracker
 from ..dsp.health import measure_health
 from ..dsp.spectrum import overview_rows, spectrum_frame
@@ -72,6 +73,7 @@ class SessionManager:
         self._det_last_t = 0.0
         self._profile: dict | None = None
         self._shape_cache: dict = {}
+        self.last_inspection: dict | None = None
         self.active: ActiveSession | None = None
         self.health: dict = {}
         self.rev = 0                    # bumps on every change, so paused views refresh
@@ -191,6 +193,47 @@ class SessionManager:
         self.det_rev += 1
         self._det_cost_s = time.perf_counter() - t0
         self._det_last_t = now
+
+    # --- Signal Inspector ---------------------------------------------------
+    def inspect(self, track_id: int | None = None, f_hz: float | None = None, bw_hz: float | None = None,
+                seconds: float = 1.0) -> dict:
+        """Take I/Q around a signal (live: `seconds` of fresh reception; recordings: at
+        the play position) and measure it (tayf.dsp.inspect). Runs without holding the
+        session lock during the capture, so the display keeps going."""
+        if not 0.05 <= seconds <= 10:
+            raise ValueError("seconds must be between 0.05 and 10")
+        with self._lock:
+            a = self._require()
+            if a.mode == "scan":
+                raise RuntimeError("A scan has no I/Q: use \"Open live here\" on the signal, then inspect it")
+            track = None
+            if track_id is not None:
+                track = next((t for t in self.tracker.table() if t["id"] == track_id), None)
+                if track is None:
+                    raise KeyError(f"No signal #{track_id} right now")
+                f_hz = track["f_center_hz"]
+                bw_hz = max(track["bandwidth_hz"], track["max_bandwidth_hz"])
+            if f_hz is None:
+                raise ValueError("Give a track or a frequency")
+            bw_hz = max(bw_hz or 10e3, 1e3)
+            src, mode, settings = a.source, a.mode, a.source.settings
+            if mode == "recording":
+                fs = settings.sample_rate_hz
+                t0 = max(0.0, min(src.position_s, src.duration_s - seconds))
+                block = src.read_at(t0, int(seconds * fs))
+        if mode == "live":
+            block = src.capture(seconds)
+        off = f_hz - block.center_freq_hz
+        half = block.sample_rate_hz / 2
+        if abs(off) + bw_hz / 2 > 0.9 * half:
+            raise RuntimeError(f"{f_hz / 1e6:.4f} MHz is outside (or at the edge of) the current span: tune to it first")
+        x = remove_dc(block.samples)
+        r = inspect_signal(x, block.sample_rate_hz, off, bw_hz, f_tuned_hz=block.center_freq_hz).to_dict()
+        r.update({"track_id": track_id, "requested_hz": f_hz, "mode": mode, "time": block.start_time.isoformat(),
+                  "settings": settings.to_dict(), "track": track})
+        with self._lock:
+            self.last_inspection = r
+        return r
 
     def detections(self) -> dict:
         """What the dashboard draws: this frame's boxes and the candidate table."""

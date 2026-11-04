@@ -217,6 +217,27 @@
     <div class="plot">
       <canvas id="cv-waterfall"></canvas>
     </div>
+    <section id="inspector" class="card inspector hidden">
+      <div class="insp-head">
+        <h2 id="insp-title">Signal Inspector</h2>
+        <span class="spacer"></span>
+        <label class="live-only" data-tip="How long to capture live I/Q for the measurement. Longer catches sparse bursts (key fobs: 2-5 s) and gives steadier numbers.">Capture
+          <select id="insp-secs"><option value="0.5">0.5 s</option><option value="1" selected>1 s</option><option value="2">2 s</option><option value="5">5 s</option></select></label>
+        <button id="insp-again" data-tip="Measure the same signal again.">Inspect again</button>
+        <button id="insp-close" class="small-btn">Close</button>
+      </div>
+      <div id="insp-msg" class="muted small"></div>
+      <div id="insp-metrics" class="insp-metrics"></div>
+      <div id="insp-notes" class="muted small"></div>
+      <div class="insp-views">
+        <div><div class="vt" data-tip="Spectrum of the channel cut out around the signal (dBFS/Hz). Dashed: the noise level; shaded: the 99 % occupied bandwidth.">Spectrum</div><canvas id="iv-spec"></canvas></div>
+        <div><div class="vt" data-tip="How the signal's spectrum changes over the capture (time down, frequency across).">Spectrogram</div><canvas id="iv-sgram"></canvas></div>
+        <div><div class="vt" data-tip="Power in the signal's own band over time. Dashed: the burst threshold (noise + 6 dB). Bursts, their lengths and gaps come from this.">Envelope</div><canvas id="iv-env"></canvas></div>
+        <div><div class="vt" data-tip="The raw I (green) and Q (blue) samples of the channel, from the first burst on.">I / Q</div><canvas id="iv-iq"></canvas></div>
+        <div><div class="vt" data-tip="Frequency of the signal at each moment, relative to its centre: FM shows the audio waveform, FSK jumps between levels, a tone is flat.">Instantaneous frequency</div><canvas id="iv-if"></canvas></div>
+        <div><div class="vt" data-tip="Symbols of a digital phase/amplitude signal (PSK, QAM) after frequency and timing correction. Only shown when a symbol rate is found; FM/FSK have none.">Constellation</div><canvas id="iv-const"></canvas></div>
+      </div>
+    </section>
     <section class="card candidates">
       <h2>Signals <span id="cand-info" class="muted small"></span></h2>
       <table class="list" id="cand-table">
@@ -227,7 +248,7 @@
           <th data-tip="How far the strongest bin stands over the local floor: now / highest seen.">SNR now / max</th>
           <th data-tip="Share of the frames (with this frequency in view) in which it was detected. 100 % = always on; low = bursts.">On</th>
           <th data-tip="When it was first and last detected (recordings: time in the recording).">First seen</th><th>Last seen</th>
-          <th></th></tr></thead>
+          <th></th><th></th></tr></thead>
         <tbody></tbody>
       </table>
       <p class="muted small" id="cand-empty">No signals yet.</p>
