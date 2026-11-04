@@ -135,6 +135,8 @@
       <label data-tip="Averages each bin over recent frames (in power, not dB). The floor gets calmer, so weak steady signals are easier to see; short bursts get flattened. Light ≈ 2 frames, medium ≈ 5, heavy ≈ 15. The waterfall stays unsmoothed.">Smoothing
         <select id="sel-smooth"><option value="off">off</option><option value="light">light</option><option value="medium">medium</option><option value="heavy">heavy</option></select>
       </label>
+      <label data-tip="Signal detection (FCME): finds signals in every frame and tracks them over time. Boxes mark this frame's detections with their track number; the candidate table under the waterfall lists every signal seen for at least 3 of 5 frames."><input type="checkbox" id="chk-detect" checked> Detect</label>
+      <label data-tip="How far a signal's strongest bin must stand above the local noise floor to be detected. Lower finds weaker signals but risks false alarms from floor ripple; 6 dB is the default (notebook 03)."> min SNR <input id="in-minsnr" type="number" min="2" max="40" step="1" value="6" style="width:52px"> dB</label>
       <label data-tip="Shows the band presets (Lebanon, ITU Region 1) along the top of the spectrum."><input type="checkbox" id="chk-bands" checked> Bands</label>
       <label data-tip="Marks carriers the HackRF makes by itself (measured in notebook 02 with nothing connected: 14, 40, 80, 120, 160, 200, 2200 MHz), so they are not taken for real signals."><input type="checkbox" id="chk-spurs" checked> Receiver spurs</label>
       <label class="rec-only" data-tip="Labels stored in the recording, e.g. the true signals of the synthetic test scene."><input type="checkbox" id="chk-truth" checked> Annotations</label>
@@ -215,6 +217,21 @@
     <div class="plot">
       <canvas id="cv-waterfall"></canvas>
     </div>
+    <section class="card candidates">
+      <h2>Signals <span id="cand-info" class="muted small"></span></h2>
+      <table class="list" id="cand-table">
+        <thead><tr>
+          <th data-tip="Track number: stays the same while the signal is followed, also across short gaps.">#</th>
+          <th data-tip="Centre frequency (power-weighted, smoothed over time).">Frequency</th>
+          <th data-tip="Widest extent seen where the signal stands at least the edge threshold (3 dB) over the floor. For weak wide signals this is narrower than the true occupied bandwidth.">Width</th>
+          <th data-tip="How far the strongest bin stands over the local floor: now / highest seen.">SNR now / max</th>
+          <th data-tip="Share of the frames (with this frequency in view) in which it was detected. 100 % = always on; low = bursts.">On</th>
+          <th data-tip="When it was first and last detected (recordings: time in the recording).">First seen</th><th>Last seen</th>
+          <th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <p class="muted small" id="cand-empty">No signals yet.</p>
+    </section>
     <div class="plot timeline rec-only">
       <div class="muted small">Whole recording (time →, frequency ↑). Click to jump.</div>
       <canvas id="cv-overview"></canvas>

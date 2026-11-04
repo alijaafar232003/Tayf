@@ -55,6 +55,8 @@ const S = {
   sel: null,            // scan: selected frequency {hz}
   lastScan: null,       // scan settings to return to after "Open live here"
   carriers: [],         // the HackRF's own carriers, from the receiver profile
+  det: null,            // detections: {boxes, tracks} from the server
+  selTrack: null,       // track picked in the candidate table
 };
 const M = { left: 52, right: 12, top: 8, bottom: 22 };   // plot margins (CSS px)
 
@@ -231,6 +233,21 @@ function drawSpectrum() {
   }
   // trace (smoothed if smoothing is on)
   line(resample(S.smooth && smoothAlpha() < 1 ? S.smooth : f, fLo, fHi, cols), css.getPropertyValue("--trace"), 1.2 * b.r);
+  // detections: a box from the floor to just above the peak, labelled with the track number
+  if (S.det?.on && $("chk-detect").checked) {
+    for (const d of S.det.boxes) {
+      if (d.f_hi_hz < fLo || d.f_lo_hz > fHi) continue;
+      const x0 = xOf(d.f_lo_hz), x1 = Math.max(xOf(d.f_hi_hz), x0 + 3 * b.r);
+      const yTop = Math.max(b.y + 2 * b.r, yOf(d.peak_dbfs + 2)), yBot = b.y + b.h;
+      const col = d.spur ? css.getPropertyValue("--spur") : css.getPropertyValue("--det");
+      ctx.fillStyle = css.getPropertyValue("--det-fill"); ctx.fillRect(x0, yTop, x1 - x0, yBot - yTop);
+      ctx.strokeStyle = col; ctx.lineWidth = (d.track === S.selTrack ? 2 : 1) * b.r;
+      ctx.setLineDash(d.confirmed ? [] : [3 * b.r, 3 * b.r]);
+      ctx.strokeRect(x0, yTop, x1 - x0, yBot - yTop);
+      ctx.setLineDash([]);
+      if (d.confirmed) { ctx.fillStyle = col; ctx.textAlign = "center"; ctx.fillText(`#${d.track}`, (x0 + x1) / 2, yTop - 3 * b.r); }
+    }
+  }
   if (S.cursorHz != null) {
     ctx.strokeStyle = css.getPropertyValue("--accent"); ctx.lineWidth = 1;
     const x = xOf(S.cursorHz); ctx.beginPath(); ctx.moveTo(x, b.y); ctx.lineTo(x, b.y + b.h); ctx.stroke();
@@ -484,7 +501,11 @@ function connectWs() {
   const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws/spectrum`);
   ws.binaryType = "arraybuffer";
   ws.onmessage = (ev) => {
-    if (typeof ev.data === "string") { const m = JSON.parse(ev.data); if (m.type === "status") setStatus(m); }
+    if (typeof ev.data === "string") {
+      const m = JSON.parse(ev.data);
+      if (m.type === "status") setStatus(m);
+      else if (m.type === "det") { S.det = m; showCandidates(); scheduleDraw(); }
+    }
     else onFrame(ev.data);
   };
   ws.onclose = () => setTimeout(connectWs, 1000);
@@ -505,6 +526,10 @@ function setStatus(st) {
   for (const id of ["cv-spectrum", "cv-waterfall"]) $(id).classList.toggle("tunable", live);
   $("btn-play").textContent = live || scan ? (st.playing ? "Freeze" : "Run") : (st.playing ? "Pause" : "Play");
   $("sel-nfft").value = String(st.nfft);
+  if (st.detector) {
+    $("chk-detect").checked = st.detector.on;
+    if (document.activeElement !== $("in-minsnr")) $("in-minsnr").value = st.detector.min_snr_db;
+  }
   $("chk-dc").checked = st.dc_remove;
   showHealth(st);
   showZoom();
@@ -655,6 +680,8 @@ $("rng-vga").oninput = (e) => { $("vga-val").textContent = e.target.value; };
 $("rng-vga").onchange = (e) => control({ vga_db: parseInt(e.target.value) });
 $("chk-offset").onchange = (e) => control({ offset_tuning: e.target.checked });
 $("chk-agc").onchange = (e) => control({ agc: e.target.checked });
+$("chk-detect").onchange = (e) => control({ detect: e.target.checked });
+$("in-minsnr").onchange = (e) => control({ min_snr_db: parseFloat(e.target.value) });
 $("sel-antenna").onchange = (e) => control({ antenna_id: e.target.value });
 
 // Mouse on the spectrum or waterfall (they share one view, so both behave the same):
@@ -827,7 +854,7 @@ $("chk-bands").onchange = $("chk-spurs").onchange = scheduleDraw;
 function showView(name) {
   $("home").classList.toggle("hidden", name !== "home");
   $("analysis").classList.toggle("hidden", name !== "analysis");
-  if (name === "analysis") { S.auto.init = false; S.zoom = null; S.smooth = null; resetWaterfall(); showZoom(); scheduleDraw(); }
+  if (name === "analysis") { S.auto.init = false; S.zoom = null; S.smooth = null; S.det = null; S.selTrack = null; resetWaterfall(); showZoom(); showCandidates(true); scheduleDraw(); }
 }
 async function openLive(body) {
   setStatus(await api("/api/session/live", { method: "POST", body }));
@@ -913,6 +940,39 @@ $("live-form").onsubmit = async (e) => {
     $("live-msg").textContent = "";
   } catch (err) { $("live-msg").textContent = err.message; }
 };
+// ---------- candidate table ----------
+// Confirmed tracks from the server; refreshed at most 4 times a second so it stays readable.
+let candDrawn = 0;
+const fmtTime = (t) => new Date(t * 1000).toLocaleTimeString([], { hour12: false });
+function showCandidates(force = false) {
+  const now = performance.now();
+  if (!force && now - candDrawn < 250) return;
+  candDrawn = now;
+  const tr = S.det?.tracks || [], on = S.det?.on;
+  $("cand-empty").classList.toggle("hidden", tr.length > 0);
+  $("cand-empty").textContent = on ? "No signals yet." : "Detection is off.";
+  $("cand-info").textContent = on ? `${tr.length} now · ${S.det.closed} finished this session · detector ${S.det.cost_ms} ms/frame` : "";
+  $("cand-table").querySelector("tbody").innerHTML = tr.map((t) => `
+    <tr data-track="${t.id}" class="${t.present ? "" : "gone"}${t.spur ? " spur" : ""}${t.id === S.selTrack ? " sel" : ""}">
+      <td><span class="dot"></span>${t.id}</td><td>${fmtHz(t.f_center_hz, 4)}</td><td>${fmtHz(t.bandwidth_hz, 1)}</td>
+      <td>${t.present ? t.snr_db.toFixed(1) : "–"} / ${t.max_snr_db.toFixed(1)} dB</td><td>${(100 * t.duty).toFixed(0)} %</td>
+      <td>${fmtTime(t.first_seen)}</td><td>${t.present ? "now" : fmtTime(t.last_seen)}</td>
+      <td class="muted">${t.spur ? "HackRF spur" : ""}</td></tr>`).join("");
+}
+// Click a row: select the signal and zoom the view onto it (step 3 opens the Signal Inspector here).
+$("cand-table").onclick = (e) => {
+  const row = e.target.closest("tr[data-track]");
+  if (!row || !S.frame) return;
+  const t = (S.det?.tracks || []).find((x) => x.id === parseInt(row.dataset.track));
+  if (!t) return;
+  S.selTrack = t.id;
+  const [bLo, bHi] = baseSpan();
+  const w = Math.min(bHi - bLo, Math.max(8 * t.bandwidth_hz, 64 * S.frame.df));
+  S.zoom = w >= (bHi - bLo) * 0.999 ? null : { c: t.f_center_hz, w };
+  if (S.status?.mode === "scan") setSelection({ hz: t.f_center_hz });
+  showZoom(); showCandidates(true); scheduleDraw();
+};
+
 // ---------- Receiver Check ----------
 $("btn-check").onclick = async () => {
   const panel = $("check-panel");

@@ -42,9 +42,11 @@ class DetectorConfig:
     min_snr_db: float = 6.0         # a detection's peak must stand this far over the local floor
     edge_snr_db: float = 3.0        # its edges extend down to this
     merge_gap_hz: float = 0.0       # join detections closer than this
+    split_db: float = 6.0           # split a detection at a dip this far below the peaks on both sides
     floor_window_frac: float = 1 / 32   # local floor: running median over this share of the span
     trend_window_frac: float = 1 / 4    # slow trend taken out before FCME (0 = off)
-    dc_guard_hz: float = 2e3        # bins this close to the LO are not detected (DC spike)
+    dc_guard_hz: float = 2e3        # bins this close to the LO are not detected (DC spike;
+    dc_guard_bins: float = 3.0      # whichever is wider: the residue after DC removal spreads ~3 bins)
     start_frac: float = 0.25        # FCME starts from this share of the quietest bins
     welch_overlap_k: float = 0.95   # independent averages per Welch average (Hann, 50 % overlap)
 
@@ -122,7 +124,7 @@ def detect(frame: SpectrumFrame, cfg: DetectorConfig | None = None, shape_db: np
     p_db = np.where(valid, p_db, np.nanmedian(p_db))
     flat_db = p_db - shape_db if shape_db is not None else p_db
     if lo_hz is not None:
-        valid &= np.abs(f - lo_hz) > max(cfg.dc_guard_hz, 1.5 * df)
+        valid &= np.abs(f - lo_hz) > max(cfg.dc_guard_hz, cfg.dc_guard_bins * df)
     k_eff = max(1.0, frame.n_averages * cfg.welch_overlap_k)
     factor = threshold_factor(cfg.pfa, k_eff)
     trend = np.zeros_like(flat_db)
@@ -157,6 +159,24 @@ def detect(frame: SpectrumFrame, cfg: DetectorConfig | None = None, shape_db: np
         else:
             i += 1
 
+    # Neighbours whose skirts touch come out as one detection: split at deep dips.
+    sm = np.convolve(snr, np.ones(3) / 3, mode="same")
+
+    def split(a: int, b: int) -> list[list[int]]:
+        if b - a < 4:
+            return [[a, b]]
+        seg = sm[a:b + 1]
+        best, best_depth = None, cfg.split_db
+        for m in range(1, len(seg) - 1):
+            if seg[m] <= seg[m - 1] and seg[m] <= seg[m + 1]:
+                depth = min(seg[:m].max(), seg[m + 1:].max()) - seg[m]
+                if depth >= best_depth:
+                    best, best_depth = m, depth
+        if best is None:
+            return [[a, b]]
+        return split(a, a + best - 1) + split(a + best + 1, b)
+
+    det = [p for a, b in det for p in split(a, b)]
     out = []
     for a, b in det:
         seg = slice(a, b + 1)

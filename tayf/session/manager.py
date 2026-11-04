@@ -15,6 +15,8 @@ import numpy as np
 from ..core.models import IQBlock, SpectrumFrame, SweepFrame, utc_now
 from ..core.sigmf_io import SigMFRecording
 from ..dsp.dc import remove_dc
+from ..dsp.detect import DetectorConfig, detect, shape_for
+from ..dsp.track import Tracker
 from ..dsp.health import measure_health
 from ..dsp.spectrum import overview_rows, spectrum_frame
 from ..receiver.agc import AGC
@@ -59,6 +61,17 @@ class SessionManager:
         self.checking = False                   # a Receiver Check is changing the gains
         self.agc: AGC | None = None             # automatic gain control (live), None = off
         self.profile_dir = self.recordings_dir.parent / "receiver"
+        # Detection (Phase 3): detector + tracker run on every displayed frame
+        self.detect_on = True
+        self.det_cfg = DetectorConfig()
+        self.tracker = Tracker()
+        self.closed_tracks: list[dict] = []     # summaries of finished tracks (saved to history in step 4)
+        self.boxes: list[dict] = []             # the latest frame's detections, with track IDs
+        self.det_rev = 0                        # bumps when boxes/tracks change
+        self._det_cost_s = 0.0
+        self._det_last_t = 0.0
+        self._profile: dict | None = None
+        self._shape_cache: dict = {}
         self.active: ActiveSession | None = None
         self.health: dict = {}
         self.rev = 0                    # bumps on every change, so paused views refresh
@@ -131,10 +144,59 @@ class SessionManager:
                 self.active = None
                 self.health = {}
                 self.agc = None
+                self._end_tracks()
                 self._changed()
 
     def _changed(self) -> None:
         self.rev += 1
+
+    # --- detection + tracking ---------------------------------------------
+    def _end_tracks(self) -> None:
+        self.tracker.close_all()
+        self.closed_tracks = (self.closed_tracks + self.tracker.take_closed())[-500:]
+        self.boxes, self._shape_cache = [], {}
+        self._profile = None                    # reloaded on next use (it may have been re-measured)
+        self.det_rev += 1
+
+    def _detect(self, a: ActiveSession, frame: SpectrumFrame, track: bool = True) -> None:
+        """Run the detector on a displayed frame and (for new frames) the tracker.
+        Skips frames when detection is expensive (large scans) to keep the CPU free."""
+        now = time.monotonic()
+        if not self.detect_on or now - self._det_last_t < min(1.0, 3 * self._det_cost_s):
+            return
+        t0 = time.perf_counter()
+        if self._profile is None:
+            self._profile = load_profile(self.profile_dir) or {}
+        # The receiver's floor shape only fits spectra from this HackRF (not scans:
+        # hackrf_sweep stitches its own segments; not other receivers' files).
+        shape = None
+        hw = a.source.settings.hardware or ""
+        if a.mode != "scan" and "HackRF" in hw:
+            key = (len(frame.freqs_hz), float(frame.freqs_hz[1] - frame.freqs_hz[0]))
+            if key not in self._shape_cache:
+                self._shape_cache[key] = shape_for(self._profile, frame)
+            shape = self._shape_cache[key]
+        spurs = [c["freq_hz"] for c in (self._profile or {}).get("internal_carriers", [])]
+        lo = None if a.mode == "scan" else frame.center_freq_hz
+        dets, info = detect(frame, self.det_cfg, shape_db=shape, spurs_hz=spurs, lo_hz=lo)
+        if track:
+            span = (float(frame.freqs_hz[0]), float(frame.freqs_hz[-1]))
+            pairs = self.tracker.update(dets, frame.time.timestamp(), span)
+            self.closed_tracks = (self.closed_tracks + self.tracker.take_closed())[-500:]
+        else:
+            pairs = [(d, None) for d in dets]
+        confirmed = {tr["id"] for tr in self.tracker.table()}
+        self.boxes = [{**d.to_dict(), "track": tid, "confirmed": tid in confirmed} for d, tid in pairs]
+        self.det_floor_dbfs = info["floor_dbfs"]
+        self.det_rev += 1
+        self._det_cost_s = time.perf_counter() - t0
+        self._det_last_t = now
+
+    def detections(self) -> dict:
+        """What the dashboard draws: this frame's boxes and the candidate table."""
+        with self._lock:
+            return {"type": "det", "on": self.detect_on, "boxes": self.boxes, "tracks": self.tracker.table()[:100],
+                    "closed": len(self.closed_tracks), "cost_ms": round(1000 * self._det_cost_s, 1)}
 
     # --- recording from live --------------------------------------------
     def start_recording(self) -> dict:
@@ -177,6 +239,8 @@ class SessionManager:
                 "center_freq_hz": s.center_freq_hz, "sample_rate_hz": s.sample_rate_hz,
                 "playing": pb.playing, "nfft": pb.nfft, "fps": pb.fps, "dc_remove": pb.dc_remove,
                 "settings": s.to_dict(), "health": self.health,
+                "detector": {"on": self.detect_on, "min_snr_db": self.det_cfg.min_snr_db,
+                             "tracks": len(self.tracker.table()), "closed": len(self.closed_tracks)},
             }
             if a.mode == "recording":
                 st.update({
@@ -235,6 +299,17 @@ class SessionManager:
         with self._lock:
             a = self._require()
             pb, src = a.playback, a.source
+            if "detect" in cmd:
+                self.detect_on = bool(cmd["detect"])
+                if not self.detect_on:
+                    self.boxes = []
+                    self.det_rev += 1
+            if "min_snr_db" in cmd:
+                v = float(cmd["min_snr_db"])
+                if not 2 <= v <= 40:
+                    raise ValueError("min_snr_db must be between 2 and 40 dB")
+                self.det_cfg.min_snr_db = v
+                self.det_cfg.edge_snr_db = min(3.0, v / 2)
             if "nfft" in cmd:
                 if int(cmd["nfft"]) not in NFFT_CHOICES:
                     raise ValueError("nfft must be a power of two from 256 to 16384")
@@ -355,7 +430,10 @@ class SessionManager:
             if not a.playback.playing:
                 return None
             if a.mode == "scan":
-                return self._sweep_frame(a, a.source.take())
+                frame = self._sweep_frame(a, a.source.take())
+                if frame is not None:
+                    self._detect(a, frame)
+                return frame
             n = self._samples_per_frame(a)
             if a.mode == "live":
                 n = min(n, MAX_SAMPLES_PER_FRAME)   # live never needs more than it processes
@@ -365,7 +443,9 @@ class SessionManager:
                     a.playback.playing = False
                     self._changed()
                 return None
-            return self._to_frame(a, block)
+            frame = self._to_frame(a, block)
+            self._detect(a, frame)
+            return frame
 
     def current_frame(self) -> SpectrumFrame | None:
         """Spectrum at the playhead without moving it (paused or seeked view)."""
@@ -380,7 +460,9 @@ class SessionManager:
                 block = a.source.latest(n)
             if block is None or len(block) < a.playback.nfft:
                 return None
-            return self._to_frame(a, block)
+            frame = self._to_frame(a, block)
+            self._detect(a, frame, track=False)          # paused: boxes for this view, no tracking
+            return frame
 
     def overview(self, rows: int = 300, nfft: int = 1024) -> tuple[np.ndarray, np.ndarray]:
         with self._lock:

@@ -101,6 +101,8 @@ class ControlIn(BaseModel):
     offset_tuning: bool | None = None
     antenna_id: str | None = None
     agc: bool | None = None
+    detect: bool | None = None
+    min_snr_db: float | None = None
     # scan
     f_lo_hz: float | None = None
     f_hi_hz: float | None = None
@@ -287,6 +289,10 @@ def create_app(data_dir: str | Path = "data") -> FastAPI:
             raise HTTPException(400, str(e))
         return manager.status()
 
+    @app.get("/api/session/detections")
+    def detections():
+        return manager.detections()
+
     @app.get("/api/session/overview")
     def overview(rows: int = 300, nfft: int = 1024):
         try:
@@ -307,7 +313,7 @@ def create_app(data_dir: str | Path = "data") -> FastAPI:
     async def spectrum_ws(ws: WebSocket):
         await ws.accept()
         loop = asyncio.get_running_loop()
-        sent_rev, paused_rev, last_status_t = None, None, 0.0
+        sent_rev, paused_rev, last_status_t, sent_det = None, None, 0.0, None
         try:
             while True:
                 t0 = loop.time()
@@ -326,6 +332,10 @@ def create_app(data_dir: str | Path = "data") -> FastAPI:
                             paused_rev = st["rev"]
                 except RuntimeError:                # session closed meanwhile
                     pass
+                # Detections (boxes + candidate table) whenever they changed
+                if manager.det_rev != sent_det:
+                    sent_det = manager.det_rev
+                    await ws.send_json(manager.detections())
                 # Status on every change, and twice a second for the health readouts.
                 st = manager.status()
                 if st["rev"] != sent_rev or t0 - last_status_t > 0.5:

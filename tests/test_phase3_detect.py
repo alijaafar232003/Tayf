@@ -64,3 +64,18 @@ def test_flattening_with_the_receiver_shape():
     hump = SpectrumFrame(f.freqs_hz, (f.power_dbfs + shape).astype(np.float32), DF, FC, utc_now(), n_averages=K)
     with_shape, _ = detect(hump, DetectorConfig(floor_window_frac=1 / 4), shape_db=shape, lo_hz=FC)
     assert with_shape == []
+
+
+def test_touching_neighbours_are_split_at_the_dip():
+    # Two bell-shaped signals (like FM stations) 150 kHz apart whose skirts overlap:
+    # everything between them stays above 3 dB, but the dip is ~10 dB deep.
+    f = frame()
+    off = f.freqs_hz - FC
+    x = 10 ** (f.power_dbfs / 10)
+    for c, peak in ((0, 25.0), (150e3, 22.0)):
+        x += 10 ** ((-80 + peak) / 10) * np.exp(-0.5 * ((off - c) / 30e3) ** 2)
+    f2 = SpectrumFrame(f.freqs_hz, (10 * np.log10(x)).astype(np.float32), DF, FC, utc_now(), n_averages=K)
+    snr_mid = 10 * np.log10(x[np.argmin(abs(off - 75e3))] / 10 ** (-80 / 10))
+    assert snr_mid > 3                                  # they really are joined above the edge threshold
+    dets, _ = detect(f2, lo_hz=FC - 600e3)
+    assert sorted(round((d.f_center_hz - FC) / 10e3) * 10 for d in dets) == [0, 150]
